@@ -1,1 +1,1 @@
-allow-build = @nestjs/core,@tailwindcss/oxide,sharp,unrs-resolver
+ignore-scripts=false
