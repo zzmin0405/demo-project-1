@@ -1,9 +1,15 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "$schema": "https://vercel.com/schema.json",
   "builds": [
     {
       "src": "ai-meet/apps/web/next.config.ts",
       "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/ai-meet/apps/web/$1"
     }
   ]
 }
