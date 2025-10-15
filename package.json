@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "pnpm": {
+    "allowed-build-scripts": [
+      "@nestjs/core",
+      "@tailwindcss/oxide",
+      "sharp",
+      "unrs-resolver"
+    ]
+  }
+}

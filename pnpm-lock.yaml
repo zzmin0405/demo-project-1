@@ -6,6 +6,8 @@ settings:
 
 importers:
 
+  .: {}
+
   ai-meet/apps/api:
     dependencies:
       '@nestjs/common':
