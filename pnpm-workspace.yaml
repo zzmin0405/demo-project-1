@@ -1,0 +1,3 @@
+packages:
+  - 'ai-meet/apps/*'
+  - 'ai-meet/packages/*'
