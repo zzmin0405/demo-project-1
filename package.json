@@ -1,3 +1,13 @@
 {
-  "private": true
+  "private": true,  
+  "name": "ai-meet-monorepo",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "@tailwindcss/oxide",
+      "sharp",
+      "unrs-resolver"
+    ]
+  }
+
 }
