@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "builds": [
+    {
+      "src": "ai-meet/apps/web/next.config.ts",
+      "use": "@vercel/next"
+    }
+  ]
+}
