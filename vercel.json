@@ -1,9 +1,0 @@
-{
-  "$schema": "https://vercel.com/schema.json",
-  "builds": [
-    {
-      "src": "ai-meet/apps/web/package.json",
-      "use": "@vercel/next"
-    }
-  ]
-}
