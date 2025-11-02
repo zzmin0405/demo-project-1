@@ -127,7 +127,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         router.push('/login');
         return;
       }
-      // @ts-expect-error
+      // @ts-expect-error Property 'auth' does not exist on type 'Socket'
       socket.auth.token = session.access_token;
 
       // 2. Get Media
