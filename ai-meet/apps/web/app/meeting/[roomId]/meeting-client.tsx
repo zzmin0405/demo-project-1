@@ -30,32 +30,50 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoOn, setLocalVideoOn] = useState(true);
+  const [isMuted, setIsMuted] = useState(false);
+  const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState<string | null>(null);
+  const [availableVideoDevices, setAvailableVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [availableAudioInputDevices, setAvailableAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioInputDeviceId, setSelectedAudioInputDeviceId] = useState<string | null>(null);
+  const [availableAudioOutputDevices, setAvailableAudioOutputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioOutputDeviceId, setSelectedAudioOutputDeviceId] = useState<string | null>(null);
+  const [volume, setVolume] = useState(0.8); // Master volume for remote streams
   
   const socketRef = useRef<Socket | null>(null);
   const peerConnections = useRef<{ [userId: string]: RTCPeerConnection }>({});
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
   const remoteVideoRefs = useRef<{ [userId: string]: HTMLVideoElement | null }>({});
   const socketIdToUserIdMap = useRef<{ [socketId: string]: string }>({});
+  const userIdToSocketIdMap = useRef<{ [userId: string]: string }>({});
   const isInitialized = useRef(false); // Flag to prevent double initialization in Strict Mode
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
 
   useEffect(() => {
-    // This flag ensures initialize runs only once per logical mount, even with Strict Mode
     if (isInitialized.current) {
-      console.log('Client: Already initialized (ref), skipping re-initialization.');
       return;
     }
-    isInitialized.current = true; // Set flag to prevent further initialization
+    isInitialized.current = true;
 
-    let currentLocalStream: MediaStream | null = null;
+    console.log('Client: useEffect triggered');
+    let localStreamForCleanup: MediaStream | null = null;
+    const socket = io(process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001', {
+      autoConnect: false, // Prevent auto-connection
+      auth: {
+        // This will be populated after we get the session
+      },
+    });
+    socketRef.current = socket;
 
     const createPeerConnection = (peerUserId: string, peerSocketId: string) => {
+      console.log(`Client: Creating peer connection for ${peerUserId}`);
       try {
         const pc = new RTCPeerConnection(ICE_SERVERS);
 
         pc.onicecandidate = (event) => {
           if (event.candidate && socketRef.current) {
+            console.log(`Client: Sending ICE candidate to ${peerUserId}`);
             socketRef.current.emit('ice-candidate', {
               to: peerSocketId,
               candidate: event.candidate,
@@ -64,15 +82,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         };
 
         pc.ontrack = (event) => {
+          console.log(`Client: Received track from ${peerUserId}`);
           const videoElement = remoteVideoRefs.current[peerUserId];
           if (videoElement && event.streams[0]) {
             videoElement.srcObject = event.streams[0];
           }
         };
 
-        currentLocalStream?.getTracks().forEach(track => {
-          pc.addTrack(track, currentLocalStream!);
-        });
+        // If the local stream already exists, add its tracks to the peer connection.
+        if (localStreamRef.current) {
+          console.log(`Client: Adding local stream tracks to new peer connection for ${peerUserId}`);
+          localStreamRef.current.getTracks().forEach(track => {
+            pc.addTrack(track, localStreamRef.current!);
+          });
+        }
 
         peerConnections.current[peerUserId] = pc;
         return pc;
@@ -83,15 +106,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     };
 
     const initialize = async () => {
+      console.log('Client: Initializing...');
       // 1. Get User and Profile
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
+        console.log('Client: No user found, redirecting to login.');
         router.push('/login');
         return;
       }
       setCurrentUser(user);
-      const currentUserId = user.id; // Use this for filtering
-      console.log('Client: currentUser set to', currentUserId, 'from supabase.auth.getUser()');
+      const currentUserId = user.id;
+      console.log('Client: currentUser set to', currentUserId);
 
       const { data: profile } = await supabase.from('profiles').select('username, full_name, avatar_url').eq('id', user.id).single();
       const username = profile?.username || profile?.full_name || user.email || 'Anonymous';
@@ -99,29 +124,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
+        console.log('Client: No session found, redirecting to login.');
         router.push('/login');
         return;
       }
+      // @ts-ignore
+      socket.auth.token = session.access_token;
 
       // 2. Get Media
-      try {
-        currentLocalStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        setLocalStream(currentLocalStream);
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = currentLocalStream;
-        }
-      } catch (err) {
-        console.error('Error accessing media devices:', err);
-        return;
-      }
+      console.log('Client: Media will be acquired manually.');
 
       // 3. Initialize WebSocket and Join Room
-      const socket = io('http://localhost:3001', {
-        auth: {
-          token: session.access_token,
-        },
-      });
-      socketRef.current = socket;
+      socket.connect();
 
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
@@ -141,57 +155,52 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             avatar_url: profiles?.find(pr => pr.id === p.userId)?.avatar_url,
           }));
         }
-        const filteredParticipants = participantsWithData.filter(p => p.userId !== currentUserId); // Use currentUserId
-        console.log('Client: room-state filtered participants', filteredParticipants);
+        const filteredParticipants = participantsWithData.filter(p => p.userId !== currentUserId);
         setParticipants(filteredParticipants);
 
         data.participants.forEach(p => {
           socketIdToUserIdMap.current[p.socketId] = p.userId;
+          userIdToSocketIdMap.current[p.userId] = p.socketId;
         });
       });
 
       socket.on('user-joined', async (data: Participant & { socketId: string }) => {
         console.log(`Client: New user ${data.username} joined with socketId ${data.socketId}.`);
+        if (data.userId === currentUserId) return; // Don't process self-join
+
         const { data: profile } = await supabase.from('profiles').select('avatar_url').eq('id', data.userId).single();
         const newParticipant = { ...data, avatar_url: profile?.avatar_url };
-        
-        if (newParticipant.userId !== currentUserId) { // Use currentUserId
-          console.log('Client: Adding new participant', newParticipant);
-          setParticipants(prev => [...prev, newParticipant]);
-        } else {
-          console.log('Client: Not adding self as new participant', newParticipant);
-        }
-
+        setParticipants(prev => [...prev, newParticipant]);
         socketIdToUserIdMap.current[data.socketId] = data.userId;
+        userIdToSocketIdMap.current[data.userId] = data.socketId;
 
         const pc = createPeerConnection(data.userId, data.socketId);
         if (pc) {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
+          console.log(`Client: Sending offer to ${data.username}`);
           socket.emit('offer', { to: data.socketId, offer });
         }
       });
 
       socket.on('offer', async (data: { from: string; offer: any }) => {
-        console.log('Client: Received offer from', data.from);
         const userId = socketIdToUserIdMap.current[data.from];
-        if (!userId) {
-          console.warn('Client: Could not find userId for socketId', data.from);
-          return;
-        }
+        console.log(`Client: Received offer from ${userId}`);
+        if (!userId) return;
 
         const pc = createPeerConnection(userId, data.from);
         if (pc) {
           await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
+          console.log(`Client: Sending answer to ${userId}`);
           socket.emit('answer', { to: data.from, answer });
         }
       });
 
       socket.on('answer', async (data: { from: string; answer: any }) => {
-        console.log('Client: Received answer from', data.from);
         const userId = socketIdToUserIdMap.current[data.from];
+        console.log(`Client: Received answer from ${userId}`);
         if (!userId) return;
 
         const pc = peerConnections.current[userId];
@@ -201,12 +210,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       socket.on('ice-candidate', (data: { from: string; candidate: any }) => {
-        console.log('Client: Received ICE candidate from', data.from);
         const userId = socketIdToUserIdMap.current[data.from];
         if (!userId) return;
-
         const pc = peerConnections.current[userId];
         if (pc) {
+          console.log(`Client: Adding ICE candidate from ${userId}`);
           pc.addIceCandidate(new RTCIceCandidate(data.candidate));
         }
       });
@@ -217,12 +225,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           peerConnections.current[data.userId].close();
           delete peerConnections.current[data.userId];
         }
-        for (const socketId in socketIdToUserIdMap.current) {
-          if (socketIdToUserIdMap.current[socketId] === data.userId) {
-            delete socketIdToUserIdMap.current[socketId];
-            break;
-          }
+        // Clean up maps
+        const socketId = Object.keys(socketIdToUserIdMap.current).find(sid => socketIdToUserIdMap.current[sid] === data.userId);
+        if (socketId) {
+          delete socketIdToUserIdMap.current[socketId];
         }
+        delete userIdToSocketIdMap.current[data.userId];
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
@@ -233,7 +241,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('disconnect', (reason) => {
         console.log('Client: Disconnected from WebSocket server', reason);
-        setParticipants([]);
       });
       socket.on('connect_error', (error) => {
         console.error('Client: WebSocket connection error', error);
@@ -243,14 +250,41 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     initialize();
 
     return () => {
-      currentLocalStream?.getTracks().forEach(track => track.stop());
+      console.log('Client: useEffect cleanup');
+      localStreamForCleanup?.getTracks().forEach(track => track.stop());
       Object.values(peerConnections.current).forEach(pc => pc.close());
-      socketRef.current?.disconnect();
-      socketRef.current = null; // Reset socketRef.current
+      peerConnections.current = {};
+      socket.disconnect();
+      socketRef.current = null;
       socketIdToUserIdMap.current = {};
-      // isInitialized.current is NOT reset here. It should persist across Strict Mode double-invocations.
+      setParticipants([]);
     };
   }, [roomId, router, supabase]);
+
+  useEffect(() => {
+    const setAudioOutput = async () => {
+      if (selectedAudioOutputDeviceId) {
+        Object.values(remoteVideoRefs.current).forEach(videoElement => {
+          if (videoElement && typeof videoElement.setSinkId === 'function') {
+            try {
+              videoElement.setSinkId(selectedAudioOutputDeviceId);
+            } catch (error) {
+              console.error('Error setting audio output:', error);
+            }
+          }
+        });
+      }
+    };
+    setAudioOutput();
+  }, [selectedAudioOutputDeviceId]);
+
+  useEffect(() => {
+    Object.values(remoteVideoRefs.current).forEach(videoElement => {
+      if (videoElement) {
+        videoElement.volume = volume;
+      }
+    });
+  }, [volume, participants]);
 
   const toggleCamera = () => {
     if (localStream) {
@@ -263,12 +297,87 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
+  const toggleMute = () => {
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsMuted(!audioTrack.enabled);
+      }
+    }
+  };
+
   const copyLink = () => {
     navigator.clipboard.writeText(window.location.href);
     setIsLinkCopied(true);
     setTimeout(() => {
       setIsLinkCopied(false);
     }, 2000);
+  };
+
+  const startCamera = async () => {
+    try {
+      console.log('Client: Manually starting camera...');
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputDevices = devices.filter(device => device.kind === 'videoinput');
+      setAvailableVideoDevices(videoInputDevices);
+      const audioInputDevices = devices.filter(device => device.kind === 'audioinput');
+      setAvailableAudioInputDevices(audioInputDevices);
+      const audioOutputDevices = devices.filter(device => device.kind === 'audiooutput');
+      setAvailableAudioOutputDevices(audioOutputDevices);
+
+      const videoConstraint: boolean | MediaTrackConstraints = selectedVideoDeviceId
+        ? { deviceId: { exact: selectedVideoDeviceId } }
+        : true;
+
+      const audioConstraint: boolean | MediaTrackConstraints = selectedAudioInputDeviceId
+        ? { deviceId: { exact: selectedAudioInputDeviceId } }
+        : true;
+
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: videoConstraint,
+        audio: audioConstraint
+      });
+
+      setLocalStream(stream);
+      localStreamRef.current = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      console.log('Client: Media stream obtained manually.');
+
+      // Add/replace tracks and renegotiate if needed
+      for (const peerUserId in peerConnections.current) {
+        const pc = peerConnections.current[peerUserId];
+        let negotiationNeeded = false;
+
+        stream.getTracks().forEach(track => {
+          const sender = pc.getSenders().find(s => s.track?.kind === track.kind);
+          if (sender) {
+            sender.replaceTrack(track);
+          } else {
+            pc.addTrack(track, stream);
+            negotiationNeeded = true;
+          }
+        });
+
+        if (negotiationNeeded) {
+          const socketId = userIdToSocketIdMap.current[peerUserId];
+          if (socketId) {
+            console.log(`Client: Renegotiating with ${peerUserId}`);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socketRef.current?.emit('offer', { to: socketId, offer });
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error accessing media devices manually:', err);
+    }
   };
 
   return (
@@ -315,7 +424,65 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         </aside>
 
         <div className="w-40 bg-background p-4 flex flex-col items-center justify-center space-y-4 border-l">
-            <Button variant="secondary" className="w-full">Mute</Button>
+            {availableVideoDevices.length > 0 && (
+              <select
+                className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground"
+                value={selectedVideoDeviceId || ''}
+                onChange={(e) => {
+                  setSelectedVideoDeviceId(e.target.value);
+                }}
+              >
+                {availableVideoDevices.map(device => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label || `Camera ${device.deviceId}`}
+                  </option>
+                ))}
+              </select>
+            )}
+            {availableAudioInputDevices.length > 0 && (
+              <select
+                className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground"
+                value={selectedAudioInputDeviceId || ''}
+                onChange={(e) => {
+                  setSelectedAudioInputDeviceId(e.target.value);
+                }}
+              >
+                {availableAudioInputDevices.map(device => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label || `Microphone ${device.deviceId}`}
+                  </option>
+                ))}
+              </select>
+            )}
+            {availableAudioOutputDevices.length > 0 && (
+              <select
+                className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground"
+                value={selectedAudioOutputDeviceId || ''}
+                onChange={(e) => {
+                  setSelectedAudioOutputDeviceId(e.target.value);
+                }}
+              >
+                {availableAudioOutputDevices.map(device => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label || `Speaker ${device.deviceId}`}
+                  </option>
+                ))}
+              </select>
+            )}
+                        <div className="w-full flex items-center space-x-2 pt-2">
+              <span title="Master Volume">🔊</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={volume}
+                onChange={(e) => setVolume(parseFloat(e.target.value))}
+                className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
+              />
+            </div>
+            <Button variant="secondary" className="w-full" onClick={toggleMute}>{isMuted ? 'Unmute' : 'Mute'}</Button>
+            <Button variant="secondary" className="w-full" onClick={startCamera}>Start Camera</Button>
             <Button variant="secondary" className="w-full" onClick={toggleCamera}>
               {localVideoOn ? 'Stop Video' : 'Start Video'}
             </Button>
