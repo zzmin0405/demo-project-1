@@ -57,7 +57,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     isInitialized.current = true;
 
     console.log('Client: useEffect triggered');
-    let localStreamForCleanup: MediaStream | null = null;
     const socket = io(process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001', {
       autoConnect: false, // Prevent auto-connection
       auth: {
@@ -128,7 +127,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         router.push('/login');
         return;
       }
-      // @ts-ignore
+      // @ts-expect-error
       socket.auth.token = session.access_token;
 
       // 2. Get Media
