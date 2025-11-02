@@ -1,6 +1,9 @@
 {
-  "private": true,  
+  "private": true,
   "name": "ai-meet-monorepo",
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./ai-meet/apps/**\" run dev"
+  },
   "pnpm": {
     "onlyBuiltDependencies": [
       "@nestjs/core",
@@ -9,5 +12,4 @@
       "unrs-resolver"
     ]
   }
-
 }

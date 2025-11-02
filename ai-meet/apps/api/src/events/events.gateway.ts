@@ -90,7 +90,12 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // WebRTC Signaling Handlers
   @SubscribeMessage('offer')
   handleOffer(client: Socket, data: { to: string; offer: any }): void {
-    client.to(data.to).emit('offer', { from: client.id, offer: data.offer });
+    const fromUserId = client['user'].sub; // Get userId from the authenticated socket
+    client.to(data.to).emit('offer', { 
+        from: client.id, 
+        fromUserId: fromUserId, // Add this
+        offer: data.offer 
+    });
   }
 
   @SubscribeMessage('answer')

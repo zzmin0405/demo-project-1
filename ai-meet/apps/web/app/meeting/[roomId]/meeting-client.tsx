@@ -183,10 +183,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('offer', async (data: { from: string; offer: RTCSessionDescriptionInit }) => {
-        const userId = socketIdToUserIdMap.current[data.from];
+      socket.on('offer', async (data: { from: string; fromUserId: string; offer: RTCSessionDescriptionInit }) => {
+        const userId = data.fromUserId; // Use the userId sent directly!
         console.log(`Client: Received offer from ${userId}`);
-        if (!userId) return;
+
+        // We can still check if we know this user, but we don't need the map for the ID anymore.
+        // We still need to store the socketId to userId mapping to send answers back.
+        socketIdToUserIdMap.current[data.from] = userId;
+        userIdToSocketIdMap.current[userId] = data.from;
 
         const pc = createPeerConnection(userId, data.from);
         if (pc) {
@@ -251,7 +255,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     return () => {
       console.log('Client: useEffect cleanup');
-      localStreamForCleanup?.getTracks().forEach(track => track.stop());
+      localStreamRef.current?.getTracks().forEach(track => track.stop());
       Object.values(peerConnections.current).forEach(pc => pc.close());
       peerConnections.current = {};
       socket.disconnect();
@@ -400,7 +404,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           {participants.map(p => (
             <div key={p.userId} className="bg-muted aspect-video rounded-lg flex items-center justify-center relative">
               {p.hasVideo ? (
-                <video ref={el => remoteVideoRefs.current[p.userId] = el} autoPlay className="w-full h-full object-cover rounded-lg"></video>
+                <video ref={el => { remoteVideoRefs.current[p.userId] = el; }} autoPlay className="w-full h-full object-cover rounded-lg"></video>
               ) : (
                 p.avatar_url ?
                   <Image src={p.avatar_url} alt={p.username || 'Participant avatar'} width={96} height={96} className="rounded-full object-cover" /> :
