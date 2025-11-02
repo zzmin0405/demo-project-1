@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
 import { createPagesBrowserClient } from '@supabase/auth-helpers-nextjs';
@@ -183,7 +183,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('offer', async (data: { from: string; offer: any }) => {
+      socket.on('offer', async (data: { from: string; offer: RTCSessionDescriptionInit }) => {
         const userId = socketIdToUserIdMap.current[data.from];
         console.log(`Client: Received offer from ${userId}`);
         if (!userId) return;
@@ -198,7 +198,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('answer', async (data: { from: string; answer: any }) => {
+      socket.on('answer', async (data: { from: string; answer: RTCSessionDescriptionInit }) => {
         const userId = socketIdToUserIdMap.current[data.from];
         console.log(`Client: Received answer from ${userId}`);
         if (!userId) return;
@@ -209,7 +209,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('ice-candidate', (data: { from: string; candidate: any }) => {
+      socket.on('ice-candidate', (data: { from: string; candidate: RTCIceCandidateInit }) => {
         const userId = socketIdToUserIdMap.current[data.from];
         if (!userId) return;
         const pc = peerConnections.current[userId];

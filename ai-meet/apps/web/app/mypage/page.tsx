@@ -145,8 +145,12 @@ export default function MyPage() {
       
       setProfile({ ...profile, avatar_url: publicUrl });
 
-    } catch (error: any) {
-      alert(error.message);
+    } catch (error) {
+      if (error instanceof Error) {
+        alert(error.message);
+      } else {
+        alert('An unknown error occurred during file upload.');
+      }
     } finally {
       setUploading(false);
     }
