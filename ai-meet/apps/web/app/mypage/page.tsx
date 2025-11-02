@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createPagesBrowserClient } from '@supabase/auth-helpers-nextjs';
+import Image from 'next/image';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -183,7 +184,7 @@ export default function MyPage() {
             <Label>Profile Picture</Label>
             <div className="flex items-center gap-4">
               {profile.avatar_url && (
-                <img src={profile.avatar_url} alt="Avatar" className="w-24 h-24 rounded-full object-cover" />
+                <Image src={profile.avatar_url} alt="Avatar" width={96} height={96} className="rounded-full object-cover" />
               )}
               <div className="flex-grow space-y-2">
                 <Input id="avatar-upload" type="file" accept="image/*" onChange={handleFileUpload} disabled={uploading} />

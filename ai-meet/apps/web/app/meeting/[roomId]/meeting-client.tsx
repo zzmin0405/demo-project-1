@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
 import { createPagesBrowserClient } from '@supabase/auth-helpers-nextjs';
+import Image from 'next/image';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { User } from '@supabase/supabase-js';
@@ -388,8 +389,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               {localVideoOn ? (
                 <video ref={localVideoRef} autoPlay muted className="w-full h-full object-cover rounded-lg"></video>
               ) : (
-                userProfile?.avatar_url ? 
-                  <img src={userProfile.avatar_url} alt={userProfile.username} className="w-24 h-24 rounded-full" /> : 
+                userProfile?.avatar_url ?
+                  <Image src={userProfile.avatar_url} alt={userProfile.username || 'User avatar'} width={96} height={96} className="rounded-full object-cover" /> :
                   <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center text-3xl font-bold">{userProfile?.username?.[0]}</div>
               )}
               <span className="absolute bottom-2 left-2 bg-black bg-opacity-75 px-2 py-1 rounded text-base text-white">You ({userProfile?.username})</span>
@@ -401,8 +402,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               {p.hasVideo ? (
                 <video ref={el => remoteVideoRefs.current[p.userId] = el} autoPlay className="w-full h-full object-cover rounded-lg"></video>
               ) : (
-                p.avatar_url ? 
-                  <img src={p.avatar_url} alt={p.username} className="w-24 h-24 rounded-full" /> : 
+                p.avatar_url ?
+                  <Image src={p.avatar_url} alt={p.username || 'Participant avatar'} width={96} height={96} className="rounded-full object-cover" /> :
                   <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center text-3xl font-bold">{p.username?.[0]}</div>
               )}
               <span className="absolute bottom-2 left-2 bg-black bg-opacity-75 px-2 py-1 rounded text-base text-white">{p.username}</span>
