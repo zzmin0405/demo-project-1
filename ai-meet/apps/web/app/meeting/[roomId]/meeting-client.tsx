@@ -29,15 +29,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [userProfile, setUserProfile] = useState<{ username: string, avatar_url?: string } | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [localVideoOn, setLocalVideoOn] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
+  const [localVideoOn, setLocalVideoOn] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
   const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState<string | null>(null);
   const [availableVideoDevices, setAvailableVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [availableAudioInputDevices, setAvailableAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedAudioInputDeviceId, setSelectedAudioInputDeviceId] = useState<string | null>(null);
   const [availableAudioOutputDevices, setAvailableAudioOutputDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedAudioOutputDeviceId, setSelectedAudioOutputDeviceId] = useState<string | null>(null);
-  const [volume, setVolume] = useState(0.8); // Master volume for remote streams
+  const [volume, setVolume] = useState(0.8);
   
   const socketRef = useRef<Socket | null>(null);
   const peerConnections = useRef<{ [userId: string]: RTCPeerConnection }>({});
@@ -46,14 +46,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const remoteVideoRefs = useRef<{ [userId: string]: HTMLVideoElement | null }>({});
   const socketIdToUserIdMap = useRef<{ [socketId: string]: string }>({});
   const userIdToSocketIdMap = useRef<{ [userId: string]: string }>({});
-  const isInitialized = useRef(false); // Flag to prevent double initialization in Strict Mode
+  const isInitialized = useRef(false);
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
   const [showEndCallModal, setShowEndCallModal] = useState(false);
   const [showMorePanel, setShowMorePanel] = useState(false);
   const [exitImmediately, setExitImmediately] = useState(false);
 
-  // Load persisted setting on mount
+
   useEffect(() => {
     const savedSetting = localStorage.getItem('exitImmediately') === 'true';
     setExitImmediately(savedSetting);
@@ -67,13 +67,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
     const socket = io(websocketUrl, {
-      autoConnect: false, // Prevent auto-connection
+      autoConnect: false,
       extraHeaders: {
         'ngrok-skip-browser-warning': 'true'
       },
-      auth: {
-        // This will be populated after we get the session
-      },
+      auth: {},
     });
     socketRef.current = socket;
 
@@ -81,7 +79,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       console.log(`Client: Creating peer connection for ${peerUserId}`);
       try {
         const pc = new RTCPeerConnection(ICE_SERVERS);
-
+        
         pc.onicecandidate = (event) => {
           if (event.candidate && socketRef.current) {
             console.log(`Client: Sending ICE candidate to ${peerUserId}`);
@@ -93,19 +91,26 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         };
 
         pc.ontrack = (event) => {
-          console.log(`Client: Received track from ${peerUserId}`);
+          console.log(`Client: Received track from ${peerUserId}`, event.streams[0]);
           const videoElement = remoteVideoRefs.current[peerUserId];
           if (videoElement && event.streams[0]) {
             videoElement.srcObject = event.streams[0];
+            console.log(`Client: Set remote stream for ${peerUserId}`);
           }
         };
 
-        // If the local stream already exists, add its tracks to the peer connection.
+        pc.onconnectionstatechange = () => {
+          console.log(`Client: Connection state for ${peerUserId}:`, pc.connectionState);
+        };
+
+        pc.oniceconnectionstatechange = () => {
+          console.log(`Client: ICE connection state for ${peerUserId}:`, pc.iceConnectionState);
+        };
+        
         if (localStreamRef.current) {
-          console.log(`Client: Adding local stream tracks to new peer connection for ${peerUserId}`);
-          localStreamRef.current.getTracks().forEach(track => {
-            pc.addTrack(track, localStreamRef.current!);
-          });
+            localStreamRef.current.getTracks().forEach(track => {
+                pc.addTrack(track, localStreamRef.current!);
+            });
         }
 
         peerConnections.current[peerUserId] = pc;
@@ -118,7 +123,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     const initialize = async () => {
       console.log('Client: Initializing...');
-      // 1. Get User and Profile
+      
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         console.log('Client: No user found, redirecting to login.');
@@ -142,10 +147,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       // @ts-expect-error Property 'auth' does not exist on type 'Socket'
       socket.auth.token = session.access_token;
 
-      // 2. Get Media
-      console.log('Client: Media will be acquired manually.');
+      try {
+        console.log('Client: Enumerating media devices...');
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setAvailableVideoDevices(devices.filter(device => device.kind === 'videoinput'));
+        setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
+        setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
+      } catch (err) {
+        console.error('Error enumerating devices:', err);
+      }
 
-      // 3. Initialize WebSocket and Join Room
       socket.connect();
 
       socket.on('connect', () => {
@@ -153,7 +164,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         socket.emit('join-room', { roomId, username });
       });
 
-      // 4. Handle Signaling
       socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[] }) => {
         console.log('Client: room-state received', data.participants);
         const userIds = data.participants.map(p => p.userId);
@@ -173,11 +183,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           socketIdToUserIdMap.current[p.socketId] = p.userId;
           userIdToSocketIdMap.current[p.userId] = p.socketId;
         });
+
+        for (const p of filteredParticipants) {
+          if (p.userId !== currentUserId && !peerConnections.current[p.userId]) {
+            createPeerConnection(p.userId, p.socketId);
+          }
+        }
       });
 
       socket.on('user-joined', async (data: Participant & { socketId: string }) => {
         console.log(`Client: New user ${data.username} joined with socketId ${data.socketId}.`);
-        if (data.userId === currentUserId) return; // Don't process self-join
+        if (data.userId === currentUserId) return;
 
         const { data: profile } = await supabase.from('profiles').select('avatar_url').eq('id', data.userId).single();
         const newParticipant = { ...data, avatar_url: profile?.avatar_url };
@@ -185,31 +201,48 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         socketIdToUserIdMap.current[data.socketId] = data.userId;
         userIdToSocketIdMap.current[data.userId] = data.socketId;
 
-        const pc = createPeerConnection(data.userId, data.socketId);
-        if (pc) {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          console.log(`Client: Sending offer to ${data.username}`);
-          socket.emit('offer', { to: data.socketId, offer });
-        }
+        createPeerConnection(data.userId, data.socketId);
       });
 
       socket.on('offer', async (data: { from: string; fromUserId: string; offer: RTCSessionDescriptionInit }) => {
-        const userId = data.fromUserId; // Use the userId sent directly!
+        const userId = data.fromUserId;
         console.log(`Client: Received offer from ${userId}`);
 
-        // We can still check if we know this user, but we don't need the map for the ID anymore.
-        // We still need to store the socketId to userId mapping to send answers back.
         socketIdToUserIdMap.current[data.from] = userId;
         userIdToSocketIdMap.current[userId] = data.from;
 
-        const pc = createPeerConnection(userId, data.from);
+        let pc: RTCPeerConnection | undefined = peerConnections.current[userId];
+        if (!pc) {
+          pc = createPeerConnection(userId, data.from);
+        }
+        
         if (pc) {
-          await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          console.log(`Client: Sending answer to ${userId}`);
-          socket.emit('answer', { to: data.from, answer });
+          try {
+            console.log(`Client: Current signaling state for ${userId}: ${pc.signalingState}`);
+            
+            if (pc.signalingState !== 'stable') {
+              console.log(`Client: Rolling back to stable state for ${userId}`);
+              await pc.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit);
+            }
+            
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            
+            if (localStreamRef.current) {
+              localStreamRef.current.getTracks().forEach(track => {
+                const sender = pc!.getSenders().find(s => s.track?.kind === track.kind);
+                if (!sender) {
+                  pc!.addTrack(track, localStreamRef.current!);
+                }
+              });
+            }
+            
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            console.log(`Client: Sending answer to ${userId}`);
+            socket.emit('answer', { to: data.from, answer });
+          } catch (err) {
+            console.error('Error handling offer:', err);
+          }
         }
       });
 
@@ -220,17 +253,32 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         const pc = peerConnections.current[userId];
         if (pc) {
-          await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+          try {
+            console.log(`Client: Current signaling state before setting answer: ${pc.signalingState}`);
+            
+            if (pc.signalingState === 'have-local-offer') {
+              await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+              console.log(`Client: Set remote description for ${userId}`);
+            } else {
+              console.warn(`Client: Ignoring answer from ${userId}, wrong state: ${pc.signalingState}`);
+            }
+          } catch (err) {
+            console.error('Error setting remote description:', err);
+          }
         }
       });
 
-      socket.on('ice-candidate', (data: { from: string; candidate: RTCIceCandidateInit }) => {
+      socket.on('ice-candidate', async (data: { from: string; candidate: RTCIceCandidateInit }) => {
         const userId = socketIdToUserIdMap.current[data.from];
         if (!userId) return;
         const pc = peerConnections.current[userId];
         if (pc) {
-          console.log(`Client: Adding ICE candidate from ${userId}`);
-          pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+          try {
+            console.log(`Client: Adding ICE candidate from ${userId}`);
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+          } catch (err) {
+            console.error('Error adding ICE candidate:', err);
+          }
         }
       });
 
@@ -240,7 +288,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           peerConnections.current[data.userId].close();
           delete peerConnections.current[data.userId];
         }
-        // Clean up maps
         const socketId = Object.keys(socketIdToUserIdMap.current).find(sid => socketIdToUserIdMap.current[sid] === data.userId);
         if (socketId) {
           delete socketIdToUserIdMap.current[socketId];
@@ -271,9 +318,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       socket.disconnect();
       socketRef.current = null;
       socketIdToUserIdMap.current = {};
+      userIdToSocketIdMap.current = {};
       setParticipants([]);
     };
   }, [roomId, router, supabase]);
+
 
   useEffect(() => {
     const setAudioOutput = async () => {
@@ -300,13 +349,24 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
   }, [volume, participants]);
 
-  const toggleCamera = () => {
-    if (localStream) {
-      const videoTrack = localStream.getVideoTracks()[0];
+  useEffect(() => {
+    if (localStream && localVideoRef.current) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
+
+  const toggleCamera = async () => {
+    if (localStreamRef.current) {
+      const videoTrack = localStreamRef.current.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setLocalVideoOn(videoTrack.enabled);
-        socketRef.current?.emit('camera-state-changed', { roomId, userId: currentUser?.id, hasVideo: videoTrack.enabled });
+        
+        socketRef.current?.emit('camera-state-changed', {
+          roomId,
+          userId: currentUser?.id,
+          hasVideo: videoTrack.enabled,
+        });
       }
     }
   };
@@ -348,47 +408,53 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         ? { deviceId: { exact: selectedAudioInputDeviceId } }
         : true;
 
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
-      }
-
       const stream = await navigator.mediaDevices.getUserMedia({
         video: videoConstraint,
         audio: audioConstraint
       });
 
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+
       setLocalStream(stream);
       localStreamRef.current = stream;
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      setLocalVideoOn(true);
       console.log('Client: Media stream obtained manually.');
 
-      // Add/replace tracks and renegotiate if needed
       for (const peerUserId in peerConnections.current) {
         const pc = peerConnections.current[peerUserId];
-        let negotiationNeeded = false;
+        const peerSocketId = userIdToSocketIdMap.current[peerUserId];
+        
+        if (!pc || !peerSocketId) continue;
 
-        stream.getTracks().forEach(track => {
+        for (const track of stream.getTracks()) {
           const sender = pc.getSenders().find(s => s.track?.kind === track.kind);
           if (sender) {
-            sender.replaceTrack(track);
+            await sender.replaceTrack(track);
           } else {
             pc.addTrack(track, stream);
-            negotiationNeeded = true;
-          }
-        });
-
-        if (negotiationNeeded) {
-          const socketId = userIdToSocketIdMap.current[peerUserId];
-          if (socketId) {
-            console.log(`Client: Renegotiating with ${peerUserId}`);
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socketRef.current?.emit('offer', { to: socketId, offer });
           }
         }
+
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socketRef.current?.emit('offer', { 
+            to: peerSocketId, 
+            offer: pc.localDescription 
+          });
+          console.log(`Client: Sent renegotiation offer to ${peerUserId}`);
+        } catch (err) {
+          console.error(`Error during renegotiation for ${peerUserId}:`, err);
+        }
       }
+
+      socketRef.current?.emit('camera-state-changed', { 
+        roomId, 
+        userId: currentUser?.id, 
+        hasVideo: true 
+      });
     } catch (err) {
       console.error('Error accessing media devices manually:', err);
     }
@@ -399,7 +465,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     localStreamRef.current?.getTracks().forEach(track => track.stop());
     Object.values(peerConnections.current).forEach(pc => pc.close());
     socketRef.current?.disconnect();
-    router.push('/'); // Redirect to homepage
+    router.push('/');
   };
 
   const handleEndCallClick = () => {
@@ -420,13 +486,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     <>
       <div className="flex flex-col h-screen bg-background text-foreground">
         <div className="flex flex-1 overflow-hidden">
-          {/* Main Video Grid */}
           <main className="flex-1 p-2 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 md:gap-4 overflow-y-auto">
             {currentUser && (
               <div className="bg-muted aspect-video rounded-lg flex items-center justify-center border-2 border-primary relative">
-                {localVideoOn ? (
-                  <video ref={localVideoRef} autoPlay muted className="w-full h-full object-cover rounded-lg"></video>
-                ) : (
+                <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover rounded-lg" style={{ display: localVideoOn ? 'block' : 'none' }}></video>
+                {!localVideoOn && (
                   userProfile?.avatar_url ?
                     <Image src={userProfile.avatar_url} alt={userProfile.username || 'User avatar'} width={96} height={96} className="rounded-full object-cover" /> :
                     <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center text-3xl font-bold">{userProfile?.username?.[0]}</div>
@@ -438,7 +502,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             {participants.map(p => (
               <div key={p.userId} className="bg-muted aspect-video rounded-lg flex items-center justify-center relative">
                 {p.hasVideo ? (
-                  <video ref={el => { remoteVideoRefs.current[p.userId] = el; }} autoPlay className="w-full h-full object-cover rounded-lg"></video>
+                  <video 
+                    ref={el => { remoteVideoRefs.current[p.userId] = el; }}
+                    autoPlay 
+                    playsInline
+                    className="w-full h-full object-cover rounded-lg"
+                  ></video>
                 ) : (
                   p.avatar_url ?
                     <Image src={p.avatar_url} alt={p.username || 'Participant avatar'} width={96} height={96} className="rounded-full object-cover" /> :
@@ -449,7 +518,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             ))}
           </main>
 
-          {/* --- Desktop Controls Sidebar --- */}
           <div className="hidden md:flex flex-col w-64 bg-card border-l p-4 space-y-4">
             <h3 className="text-lg font-semibold text-center">Controls</h3>
             
@@ -512,7 +580,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           </div>
         </div>
 
-        {/* --- Mobile Controls Footer --- */}
         <div className="md:hidden bg-card border-t p-2 flex items-center justify-around">
           <Button variant="ghost" size="icon" onClick={toggleMute} className="flex flex-col h-auto">
             <span className="text-2xl">{isMuted ? '🔇' : '🎤'}</span>
@@ -544,7 +611,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         </div>
       </div>
 
-      {/* --- More Options Panel (Mobile) --- */}
       {showMorePanel && (
         <div className="md:hidden fixed inset-0 bg-black bg-opacity-50 z-40" onClick={() => setShowMorePanel(false)}>
           <div className="fixed bottom-0 left-0 right-0 bg-card border-t rounded-t-lg p-4 z-50 animate-in slide-in-from-bottom-full" onClick={(e) => e.stopPropagation()}>
@@ -612,7 +678,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         </div>
       )}
 
-      {/* --- End Call Confirmation Modal --- */}
       {showEndCallModal && (
         <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
           <div className="bg-card p-6 rounded-lg shadow-xl max-w-sm w-full mx-4">
