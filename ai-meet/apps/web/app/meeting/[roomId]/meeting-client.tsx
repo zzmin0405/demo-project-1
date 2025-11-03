@@ -6,7 +6,6 @@ import { io, Socket } from 'socket.io-client';
 import { createPagesBrowserClient } from '@supabase/auth-helpers-nextjs';
 import Image from 'next/image';
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import type { User } from '@supabase/supabase-js';
 
 interface Participant {
@@ -50,6 +49,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const isInitialized = useRef(false); // Flag to prevent double initialization in Strict Mode
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
+  const [showEndCallModal, setShowEndCallModal] = useState(false);
+  const [showMorePanel, setShowMorePanel] = useState(false);
+  const [exitImmediately, setExitImmediately] = useState(false);
+
+  // Load persisted setting on mount
+  useEffect(() => {
+    const savedSetting = localStorage.getItem('exitImmediately') === 'true';
+    setExitImmediately(savedSetting);
+  }, []);
 
   useEffect(() => {
     if (isInitialized.current) {
@@ -57,9 +65,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
     isInitialized.current = true;
 
-    console.log('Client: useEffect triggered');
     const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
-    console.log('Client: Attempting to connect to WebSocket at:', websocketUrl);
     const socket = io(websocketUrl, {
       autoConnect: false, // Prevent auto-connection
       extraHeaders: {
@@ -244,7 +250,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
-        console.log(`Client: User ${data.userId} camera state changed: ${data.hasVideo}`);
         setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p));
       });
 
@@ -389,119 +394,237 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
+  const leaveRoom = () => {
+    console.log('Client: Leaving room');
+    localStreamRef.current?.getTracks().forEach(track => track.stop());
+    Object.values(peerConnections.current).forEach(pc => pc.close());
+    socketRef.current?.disconnect();
+    router.push('/'); // Redirect to homepage
+  };
+
+  const handleEndCallClick = () => {
+    if (exitImmediately) {
+      leaveRoom();
+    } else {
+      setShowEndCallModal(true);
+    }
+  };
+
+  const handleExitImmediatelyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newValue = e.target.checked;
+    setExitImmediately(newValue);
+    localStorage.setItem('exitImmediately', String(newValue));
+  };
+
   return (
-    <div className="flex flex-col h-screen bg-background text-foreground">
-      <div className="flex flex-1 overflow-hidden">
-        <main className="flex-1 p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 overflow-y-auto">
-          {currentUser && (
-            <div className="bg-muted aspect-video rounded-lg flex items-center justify-center border-2 border-primary relative">
-              {localVideoOn ? (
-                <video ref={localVideoRef} autoPlay muted className="w-full h-full object-cover rounded-lg"></video>
-              ) : (
-                userProfile?.avatar_url ?
-                  <Image src={userProfile.avatar_url} alt={userProfile.username || 'User avatar'} width={96} height={96} className="rounded-full object-cover" /> :
-                  <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center text-3xl font-bold">{userProfile?.username?.[0]}</div>
+    <>
+      <div className="flex flex-col h-screen bg-background text-foreground">
+        <div className="flex flex-1 overflow-hidden">
+          {/* Main Video Grid */}
+          <main className="flex-1 p-2 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 md:gap-4 overflow-y-auto">
+            {currentUser && (
+              <div className="bg-muted aspect-video rounded-lg flex items-center justify-center border-2 border-primary relative">
+                {localVideoOn ? (
+                  <video ref={localVideoRef} autoPlay muted className="w-full h-full object-cover rounded-lg"></video>
+                ) : (
+                  userProfile?.avatar_url ?
+                    <Image src={userProfile.avatar_url} alt={userProfile.username || 'User avatar'} width={96} height={96} className="rounded-full object-cover" /> :
+                    <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center text-3xl font-bold">{userProfile?.username?.[0]}</div>
+                )}
+                <span className="absolute bottom-2 left-2 bg-black bg-opacity-75 px-2 py-1 rounded text-xs md:text-base text-white">You ({userProfile?.username})</span>
+              </div>
+            )}
+
+            {participants.map(p => (
+              <div key={p.userId} className="bg-muted aspect-video rounded-lg flex items-center justify-center relative">
+                {p.hasVideo ? (
+                  <video ref={el => { remoteVideoRefs.current[p.userId] = el; }} autoPlay className="w-full h-full object-cover rounded-lg"></video>
+                ) : (
+                  p.avatar_url ?
+                    <Image src={p.avatar_url} alt={p.username || 'Participant avatar'} width={96} height={96} className="rounded-full object-cover" /> :
+                    <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center text-3xl font-bold">{p.username?.[0]}</div>
+                )}
+                <span className="absolute bottom-2 left-2 bg-black bg-opacity-75 px-2 py-1 rounded text-xs md:text-base text-white">{p.username}</span>
+              </div>
+            ))}
+          </main>
+
+          {/* --- Desktop Controls Sidebar --- */}
+          <div className="hidden md:flex flex-col w-64 bg-card border-l p-4 space-y-4">
+            <h3 className="text-lg font-semibold text-center">Controls</h3>
+            
+            <div className="space-y-2">
+              {availableVideoDevices.length > 0 && (
+                  <select
+                    className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground text-sm"
+                    value={selectedVideoDeviceId || ''}
+                    onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
+                  >
+                    {availableVideoDevices.map(device => (
+                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
+                    ))}
+                  </select>
               )}
-              <span className="absolute bottom-2 left-2 bg-black bg-opacity-75 px-2 py-1 rounded text-base text-white">You ({userProfile?.username})</span>
-            </div>
-          )}
-
-          {participants.map(p => (
-            <div key={p.userId} className="bg-muted aspect-video rounded-lg flex items-center justify-center relative">
-              {p.hasVideo ? (
-                <video ref={el => { remoteVideoRefs.current[p.userId] = el; }} autoPlay className="w-full h-full object-cover rounded-lg"></video>
-              ) : (
-                p.avatar_url ?
-                  <Image src={p.avatar_url} alt={p.username || 'Participant avatar'} width={96} height={96} className="rounded-full object-cover" /> :
-                  <div className="w-24 h-24 rounded-full bg-secondary flex items-center justify-center text-3xl font-bold">{p.username?.[0]}</div>
+              {availableAudioInputDevices.length > 0 && (
+                  <select
+                    className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground text-sm"
+                    value={selectedAudioInputDeviceId || ''}
+                    onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}
+                  >
+                    {availableAudioInputDevices.map(device => (
+                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
+                    ))}
+                  </select>
               )}
-              <span className="absolute bottom-2 left-2 bg-black bg-opacity-75 px-2 py-1 rounded text-base text-white">{p.username}</span>
+              {availableAudioOutputDevices.length > 0 && (
+                <select
+                  className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground text-sm"
+                  value={selectedAudioOutputDeviceId || ''}
+                  onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}
+                >
+                  {availableAudioOutputDevices.map(device => (
+                    <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
+                  ))}
+                </select>
+              )}
             </div>
-          ))}
-        </main>
 
-        <aside className="w-80 bg-card p-4 flex flex-col border-l">
-          <h2 className="text-lg font-semibold mb-4">Chat</h2>
-          <div className="flex-1 bg-muted rounded-lg p-2 mb-4 overflow-y-auto">
-            <p className="text-sm text-muted-foreground mb-2">[2:30 PM] Alice: Hello everyone!</p>
-            <p className="text-sm text-muted-foreground mb-2">[2:31 PM] Bob: Hey Alice, how are you?</p>
-          </div>
-          <div className="flex">
-            <Input type="text" placeholder="Type a message..." className="flex-1" />
-            <Button>Send</Button>
-          </div>
-        </aside>
-
-        <div className="w-40 bg-background p-4 flex flex-col items-center justify-center space-y-4 border-l">
-            {availableVideoDevices.length > 0 && (
-              <select
-                className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground"
-                value={selectedVideoDeviceId || ''}
-                onChange={(e) => {
-                  setSelectedVideoDeviceId(e.target.value);
-                }}
-              >
-                {availableVideoDevices.map(device => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Camera ${device.deviceId}`}
-                  </option>
-                ))}
-              </select>
-            )}
-            {availableAudioInputDevices.length > 0 && (
-              <select
-                className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground"
-                value={selectedAudioInputDeviceId || ''}
-                onChange={(e) => {
-                  setSelectedAudioInputDeviceId(e.target.value);
-                }}
-              >
-                {availableAudioInputDevices.map(device => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Microphone ${device.deviceId}`}
-                  </option>
-                ))}
-              </select>
-            )}
-            {availableAudioOutputDevices.length > 0 && (
-              <select
-                className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground"
-                value={selectedAudioOutputDeviceId || ''}
-                onChange={(e) => {
-                  setSelectedAudioOutputDeviceId(e.target.value);
-                }}
-              >
-                {availableAudioOutputDevices.map(device => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Speaker ${device.deviceId}`}
-                  </option>
-                ))}
-              </select>
-            )}
-                        <div className="w-full flex items-center space-x-2 pt-2">
+            <div className="w-full flex items-center space-x-2 pt-2">
               <span title="Master Volume">🔊</span>
               <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={volume}
+                type="range" min="0" max="1" step="0.05" value={volume}
                 onChange={(e) => setVolume(parseFloat(e.target.value))}
                 className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
               />
             </div>
-            <Button variant="secondary" className="w-full" onClick={toggleMute}>{isMuted ? 'Unmute' : 'Mute'}</Button>
-            <Button variant="secondary" className="w-full" onClick={startCamera}>Start Camera</Button>
-            <Button variant="secondary" className="w-full" onClick={toggleCamera}>
-              {localVideoOn ? 'Stop Video' : 'Start Video'}
+
+            <div className="space-y-2">
+              <Button variant="secondary" className="w-full" onClick={toggleMute}>{isMuted ? 'Unmute' : 'Mute'}</Button>
+              {localStream ? (
+                <Button variant="secondary" className="w-full" onClick={toggleCamera}>{localVideoOn ? 'Stop Video' : 'Start Video'}</Button>
+              ) : (
+                <Button variant="secondary" className="w-full" onClick={startCamera}>Start Camera</Button>
+              )}
+              <Button variant="secondary" className="w-full">Share Screen</Button>
+              <Button variant="secondary" className="w-full" onClick={copyLink}>{isLinkCopied ? 'Copied!' : 'Copy Link'}</Button>
+              <Button variant="destructive" className="w-full" onClick={handleEndCallClick}>End Call</Button>
+            </div>
+          </div>
+        </div>
+
+        {/* --- Mobile Controls Footer --- */}
+        <div className="md:hidden bg-card border-t p-2 flex items-center justify-around">
+          <Button variant="ghost" size="icon" onClick={toggleMute} className="flex flex-col h-auto">
+            <span className="text-2xl">{isMuted ? '🔇' : '🎤'}</span>
+            <span className="text-xs">{isMuted ? 'Unmute' : 'Mute'}</span>
+          </Button>
+          {localStream ? (
+            <Button variant="ghost" size="icon" onClick={toggleCamera} className="flex flex-col h-auto">
+              <span className="text-2xl">{localVideoOn ? '📹' : '📸'}</span>
+              <span className="text-xs">{localVideoOn ? 'Stop' : 'Start'}</span>
             </Button>
-            <Button variant="secondary" className="w-full">Share Screen</Button>
-            <Button variant="secondary" className="w-full" onClick={copyLink}>
-              {isLinkCopied ? 'Copied!' : 'Copy Link'}
+          ) : (
+            <Button variant="ghost" size="icon" onClick={startCamera} className="flex flex-col h-auto">
+              <span className="text-2xl">📷</span>
+              <span className="text-xs">Start Cam</span>
             </Button>
-            <Button variant="destructive" className="w-full">End Call</Button>
+          )}
+          <Button variant="ghost" size="icon" className="flex flex-col h-auto">
+            <span className="text-2xl">🖥️</span>
+            <span className="text-xs">Share</span>
+          </Button>
+          <Button variant="destructive" size="icon" onClick={handleEndCallClick} className="flex flex-col h-auto bg-red-600 hover:bg-red-700">
+            <span className="text-2xl">📞</span>
+            <span className="text-xs">End</span>
+          </Button>
+          <Button variant="ghost" size="icon" onClick={() => setShowMorePanel(true)} className="flex flex-col h-auto">
+            <span className="text-2xl">...</span>
+            <span className="text-xs">More</span>
+          </Button>
         </div>
       </div>
-    </div>
+
+      {/* --- More Options Panel (Mobile) --- */}
+      {showMorePanel && (
+        <div className="md:hidden fixed inset-0 bg-black bg-opacity-50 z-40" onClick={() => setShowMorePanel(false)}>
+          <div className="fixed bottom-0 left-0 right-0 bg-card border-t rounded-t-lg p-4 z-50 animate-in slide-in-from-bottom-full" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold mb-4 text-center">More Options</h3>
+            <div className="space-y-4">
+              <Button variant="secondary" className="w-full" onClick={copyLink}>
+                {isLinkCopied ? 'Copied!' : 'Copy Link'}
+              </Button>
+              
+              {availableVideoDevices.length > 0 && (
+                <select
+                  className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground text-sm"
+                  value={selectedVideoDeviceId || ''}
+                  onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
+                >
+                  {availableVideoDevices.map(device => (
+                    <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
+                  ))}
+                </select>
+              )}
+              {availableAudioInputDevices.length > 0 && (
+                <select
+                  className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground text-sm"
+                  value={selectedAudioInputDeviceId || ''}
+                  onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}
+                >
+                  {availableAudioInputDevices.map(device => (
+                    <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
+                  ))}
+                </select>
+              )}
+              {availableAudioOutputDevices.length > 0 && (
+                <select
+                  className="w-full p-2 border rounded-md bg-secondary text-secondary-foreground text-sm"
+                  value={selectedAudioOutputDeviceId || ''}
+                  onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}
+                >
+                  {availableAudioOutputDevices.map(device => (
+                    <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
+                  ))}
+                </select>
+              )}
+
+              <div className="w-full flex items-center space-x-2 pt-2">
+                <span title="Master Volume">🔊</span>
+                <input
+                  type="range" min="0" max="1" step="0.05" value={volume}
+                  onChange={(e) => setVolume(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-2 bg-muted rounded-lg">
+                <label htmlFor="exit-immediately-toggle">Exit Immediately</label>
+                <input
+                  type="checkbox"
+                  id="exit-immediately-toggle"
+                  className="w-5 h-5"
+                  checked={exitImmediately}
+                  onChange={handleExitImmediatelyChange}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- End Call Confirmation Modal --- */}
+      {showEndCallModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+          <div className="bg-card p-6 rounded-lg shadow-xl max-w-sm w-full mx-4">
+            <h3 className="text-lg font-semibold mb-4">Leave Meeting?</h3>
+            <p className="text-muted-foreground mb-6">Are you sure you want to leave this meeting?</p>
+            <div className="flex justify-end space-x-4">
+              <Button variant="ghost" onClick={() => setShowEndCallModal(false)}>Cancel</Button>
+              <Button variant="destructive" onClick={leaveRoom}>Leave</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

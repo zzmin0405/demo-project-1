@@ -115,4 +115,13 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   handleIceCandidate(client: Socket, data: { to: string; candidate: any }): void {
     client.to(data.to).emit('ice-candidate', { from: client.id, candidate: data.candidate });
   }
+
+  @SubscribeMessage('camera-state-changed')
+  handleCameraStateChanged(client: Socket, data: { roomId: string; userId: string; hasVideo: boolean }): void {
+    // Broadcast the camera state change to other users in the room
+    client.to(data.roomId).emit('camera-state-changed', {
+      userId: data.userId,
+      hasVideo: data.hasVideo,
+    });
+  }
 }
