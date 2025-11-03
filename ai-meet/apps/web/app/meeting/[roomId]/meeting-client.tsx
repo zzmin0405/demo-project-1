@@ -62,6 +62,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log('Client: Attempting to connect to WebSocket at:', websocketUrl);
     const socket = io(websocketUrl, {
       autoConnect: false, // Prevent auto-connection
+      extraHeaders: {
+        'ngrok-skip-browser-warning': 'true'
+      },
       auth: {
         // This will be populated after we get the session
       },
