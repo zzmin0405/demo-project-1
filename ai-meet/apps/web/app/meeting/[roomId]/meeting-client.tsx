@@ -58,7 +58,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     isInitialized.current = true;
 
     console.log('Client: useEffect triggered');
-    const socket = io(process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001', {
+    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
+    console.log('Client: Attempting to connect to WebSocket at:', websocketUrl);
+    const socket = io(websocketUrl, {
       autoConnect: false, // Prevent auto-connection
       auth: {
         // This will be populated after we get the session

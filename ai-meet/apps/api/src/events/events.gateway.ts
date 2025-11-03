@@ -53,6 +53,14 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('join-room')
   handleJoinRoom(client: Socket, data: { roomId: string; username: string }): void {
+    if (!client['user']?.sub) {
+      console.error('Unauthorized join-room attempt: userId not found on socket.', {
+        socketId: client.id,
+      });
+      client.emit('error', { message: 'Authentication error. Please reconnect.' });
+      return;
+    }
+
     const { roomId, username } = data;
     const userId = client['user'].sub; // Use the trusted userId from the guard
 
