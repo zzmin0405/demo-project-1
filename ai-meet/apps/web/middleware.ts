@@ -13,7 +13,7 @@ export async function middleware(req: NextRequest) {
 
   // if user is signed in and the current path is /login, redirect to /meeting
   if (user && req.nextUrl.pathname === '/login') {
-    return NextResponse.redirect(new URL('/meeting', req.url));
+    return NextResponse.redirect(new URL('/', req.url));
   }
 
   // if user is not signed in and the current path is not /login, redirect to /login
@@ -25,5 +25,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/meeting', '/login'],
+  matcher: ['/meeting/:path*', '/login'],
 };
