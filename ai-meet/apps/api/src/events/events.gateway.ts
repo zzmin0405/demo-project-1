@@ -95,6 +95,18 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.leaveRoom(client);
   }
 
+  @SubscribeMessage('media-chunk')
+  handleMediaChunk(client: Socket, chunk: Buffer): void {
+    const [socketId, roomId] = Array.from(client.rooms);
+
+    if (roomId) {
+      client.to(roomId).emit('media-chunk', {
+        socketId: client.id,
+        chunk: chunk,
+      });
+    }
+  }
+
   // WebRTC Signaling Handlers
   @SubscribeMessage('offer')
   handleOffer(client: Socket, data: { to: string; offer: any }): void {

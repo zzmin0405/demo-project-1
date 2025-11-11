@@ -15,13 +15,6 @@ interface Participant {
   avatar_url?: string;
 }
 
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
-};
-
 export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
   const [supabase] = useState(() => createPagesBrowserClient());
@@ -40,13 +33,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [volume, setVolume] = useState(0.8);
   
   const socketRef = useRef<Socket | null>(null);
-  const peerConnections = useRef<{ [userId: string]: RTCPeerConnection }>({});
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const remoteVideoRefs = useRef<{ [userId: string]: HTMLVideoElement | null }>({});
   const socketIdToUserIdMap = useRef<{ [socketId: string]: string }>({});
   const userIdToSocketIdMap = useRef<{ [userId: string]: string }>({});
   const isInitialized = useRef(false);
+
+  const mediaSourcesRef = useRef<{ [socketId: string]: MediaSource }>({});
+  const sourceBuffersRef = useRef<{ [socketId: string]: SourceBuffer }>({});
+  const chunkQueueRef = useRef<{ [socketId: string]: Blob[] }>({});
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
   const [showEndCallModal, setShowEndCallModal] = useState(false);
@@ -66,6 +63,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     isInitialized.current = true;
 
     const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
+    console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
       extraHeaders: {
@@ -75,50 +73,71 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
     socketRef.current = socket;
 
-    const createPeerConnection = (peerUserId: string, peerSocketId: string) => {
-      console.log(`Client: Creating peer connection for ${peerUserId}`);
-      try {
-        const pc = new RTCPeerConnection(ICE_SERVERS);
-        
-        pc.onicecandidate = (event) => {
-          if (event.candidate && socketRef.current) {
-            console.log(`Client: Sending ICE candidate to ${peerUserId}`);
-            socketRef.current.emit('ice-candidate', {
-              to: peerSocketId,
-              candidate: event.candidate,
-            });
-          }
-        };
-
-        pc.ontrack = (event) => {
-          console.log(`Client: Received track from ${peerUserId}`, event.streams[0]);
-          const videoElement = remoteVideoRefs.current[peerUserId];
-          if (videoElement && event.streams[0]) {
-            videoElement.srcObject = event.streams[0];
-            console.log(`Client: Set remote stream for ${peerUserId}`);
-          }
-        };
-
-        pc.onconnectionstatechange = () => {
-          console.log(`Client: Connection state for ${peerUserId}:`, pc.connectionState);
-        };
-
-        pc.oniceconnectionstatechange = () => {
-          console.log(`Client: ICE connection state for ${peerUserId}:`, pc.iceConnectionState);
-        };
-        
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(track => {
-                pc.addTrack(track, localStreamRef.current!);
-            });
-        }
-
-        peerConnections.current[peerUserId] = pc;
-        return pc;
-      } catch (e) {
-        console.error('Failed to create peer connection', e);
-        return undefined;
+    const setupMediaSource = (userId: string, socketId: string) => {
+      if (mediaSourcesRef.current[socketId] || !remoteVideoRefs.current[userId]) {
+        return;
       }
+      console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId}`);
+      const mediaSource = new MediaSource();
+      mediaSourcesRef.current[socketId] = mediaSource;
+      const videoElement = remoteVideoRefs.current[userId];
+
+      if (videoElement) {
+        videoElement.src = URL.createObjectURL(mediaSource);
+        videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
+      }
+
+      mediaSource.addEventListener('sourceopen', () => {
+        console.log(`MediaSource opened for ${socketId}`);
+        try {
+          const mime = 'video/webm; codecs="vp8, opus"';
+          if (!MediaSource.isTypeSupported(mime)) {
+            console.error(`${mime} is not supported`);
+            return;
+          }
+          const sourceBuffer = mediaSource.addSourceBuffer(mime);
+          sourceBuffersRef.current[socketId] = sourceBuffer;
+
+          sourceBuffer.addEventListener('updateend', async () => {
+            if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating) {
+              const nextChunk = chunkQueueRef.current[socketId].shift();
+              if (nextChunk) {
+                try {
+                  sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+                } catch (e) {
+                  console.error(`Error appending queued buffer for ${socketId}`, e);
+                }
+              }
+            }
+          });
+        } catch (e) {
+          console.error('Error adding source buffer:', e);
+        }
+      });
+    };
+
+    const cleanupMediaSource = (socketId: string) => {
+      console.log(`Cleaning up MediaSource for ${socketId}`);
+      const mediaSource = mediaSourcesRef.current[socketId];
+      if (mediaSource && mediaSource.readyState === 'open') {
+        try {
+          mediaSource.endOfStream();
+        } catch (e) {
+          console.error(`Error ending stream for ${socketId}`, e);
+        }
+      }
+      const userId = socketIdToUserIdMap.current[socketId];
+      if (userId && remoteVideoRefs.current[userId]) {
+        const videoEl = remoteVideoRefs.current[userId];
+        if (videoEl) {
+          URL.revokeObjectURL(videoEl.src);
+          videoEl.src = '';
+          videoEl.removeAttribute('src');
+        }
+      }
+      delete mediaSourcesRef.current[socketId];
+      delete sourceBuffersRef.current[socketId];
+      delete chunkQueueRef.current[socketId];
     };
 
     const initialize = async () => {
@@ -130,8 +149,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         router.push('/login');
         return;
       }
-      setCurrentUser(user);
       const currentUserId = user.id;
+      setCurrentUser(user);
       console.log('Client: currentUser set to', currentUserId);
 
       const { data: profile } = await supabase.from('profiles').select('username, full_name, avatar_url').eq('id', user.id).single();
@@ -179,16 +198,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         const filteredParticipants = participantsWithData.filter(p => p.userId !== currentUserId);
         setParticipants(filteredParticipants);
 
-        data.participants.forEach(p => {
-          socketIdToUserIdMap.current[p.socketId] = p.userId;
-          userIdToSocketIdMap.current[p.userId] = p.socketId;
-        });
-
-        for (const p of filteredParticipants) {
-          if (p.userId !== currentUserId && !peerConnections.current[p.userId]) {
-            createPeerConnection(p.userId, p.socketId);
-          }
-        }
+        // Use a timeout to ensure video elements are rendered before setting up MediaSource
+        setTimeout(() => {
+          data.participants.forEach(p => {
+            if (p.userId !== currentUserId) {
+              socketIdToUserIdMap.current[p.socketId] = p.userId;
+              userIdToSocketIdMap.current[p.userId] = p.socketId;
+              setupMediaSource(p.userId, p.socketId);
+            }
+          });
+        }, 100);
       });
 
       socket.on('user-joined', async (data: Participant & { socketId: string }) => {
@@ -197,103 +216,47 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         const { data: profile } = await supabase.from('profiles').select('avatar_url').eq('id', data.userId).single();
         const newParticipant = { ...data, avatar_url: profile?.avatar_url };
-        setParticipants(prev => [...prev, newParticipant]);
-        socketIdToUserIdMap.current[data.socketId] = data.userId;
-        userIdToSocketIdMap.current[data.userId] = data.socketId;
-
-        createPeerConnection(data.userId, data.socketId);
-      });
-
-      socket.on('offer', async (data: { from: string; fromUserId: string; offer: RTCSessionDescriptionInit }) => {
-        const userId = data.fromUserId;
-        console.log(`Client: Received offer from ${userId}`);
-
-        socketIdToUserIdMap.current[data.from] = userId;
-        userIdToSocketIdMap.current[userId] = data.from;
-
-        let pc: RTCPeerConnection | undefined = peerConnections.current[userId];
-        if (!pc) {
-          pc = createPeerConnection(userId, data.from);
-        }
         
-        if (pc) {
-          try {
-            console.log(`Client: Current signaling state for ${userId}: ${pc.signalingState}`);
-            
-            if (pc.signalingState !== 'stable') {
-              console.log(`Client: Rolling back to stable state for ${userId}`);
-              await pc.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit);
-            }
-            
-            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
-            
-            if (localStreamRef.current) {
-              localStreamRef.current.getTracks().forEach(track => {
-                const sender = pc!.getSenders().find(s => s.track?.kind === track.kind);
-                if (!sender) {
-                  pc!.addTrack(track, localStreamRef.current!);
-                }
-              });
-            }
-            
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            console.log(`Client: Sending answer to ${userId}`);
-            socket.emit('answer', { to: data.from, answer });
-          } catch (err) {
-            console.error('Error handling offer:', err);
-          }
-        }
-      });
-
-      socket.on('answer', async (data: { from: string; answer: RTCSessionDescriptionInit }) => {
-        const userId = socketIdToUserIdMap.current[data.from];
-        console.log(`Client: Received answer from ${userId}`);
-        if (!userId) return;
-
-        const pc = peerConnections.current[userId];
-        if (pc) {
-          try {
-            console.log(`Client: Current signaling state before setting answer: ${pc.signalingState}`);
-            
-            if (pc.signalingState === 'have-local-offer') {
-              await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-              console.log(`Client: Set remote description for ${userId}`);
-            } else {
-              console.warn(`Client: Ignoring answer from ${userId}, wrong state: ${pc.signalingState}`);
-            }
-          } catch (err) {
-            console.error('Error setting remote description:', err);
-          }
-        }
-      });
-
-      socket.on('ice-candidate', async (data: { from: string; candidate: RTCIceCandidateInit }) => {
-        const userId = socketIdToUserIdMap.current[data.from];
-        if (!userId) return;
-        const pc = peerConnections.current[userId];
-        if (pc) {
-          try {
-            console.log(`Client: Adding ICE candidate from ${userId}`);
-            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-          } catch (err) {
-            console.error('Error adding ICE candidate:', err);
-          }
-        }
+        setParticipants(prev => {
+          const newParticipants = [...prev, newParticipant];
+          // Use a timeout to ensure video element is rendered before setting up MediaSource
+          setTimeout(() => {
+            socketIdToUserIdMap.current[data.socketId] = data.userId;
+            userIdToSocketIdMap.current[data.userId] = data.socketId;
+            setupMediaSource(data.userId, data.socketId);
+          }, 100);
+          return newParticipants;
+        });
       });
 
       socket.on('user-left', (data: { userId: string }) => {
         console.log(`Client: User ${data.userId} left`);
-        if (peerConnections.current[data.userId]) {
-          peerConnections.current[data.userId].close();
-          delete peerConnections.current[data.userId];
-        }
-        const socketId = Object.keys(socketIdToUserIdMap.current).find(sid => socketIdToUserIdMap.current[sid] === data.userId);
+        const socketId = userIdToSocketIdMap.current[data.userId];
         if (socketId) {
+          cleanupMediaSource(socketId);
           delete socketIdToUserIdMap.current[socketId];
+          delete userIdToSocketIdMap.current[data.userId];
         }
-        delete userIdToSocketIdMap.current[data.userId];
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
+      });
+
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
+        const { socketId, chunk } = data;
+        const blob = new Blob([chunk], { type: 'video/webm' });
+        const sourceBuffer = sourceBuffersRef.current[socketId];
+
+        if (sourceBuffer && !sourceBuffer.updating) {
+            try {
+                sourceBuffer.appendBuffer(await blob.arrayBuffer());
+            } catch (e) {
+                console.error(`Error appending buffer for ${socketId}`, e);
+            }
+        } else {
+            if (!chunkQueueRef.current[socketId]) {
+                chunkQueueRef.current[socketId] = [];
+            }
+            chunkQueueRef.current[socketId].push(blob);
+        }
       });
 
       socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
@@ -312,9 +275,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     return () => {
       console.log('Client: useEffect cleanup');
+      mediaRecorderRef.current?.stop();
       localStreamRef.current?.getTracks().forEach(track => track.stop());
-      Object.values(peerConnections.current).forEach(pc => pc.close());
-      peerConnections.current = {};
+      
+      Object.keys(mediaSourcesRef.current).forEach(socketId => {
+        cleanupMediaSource(socketId);
+      });
+
       socket.disconnect();
       socketRef.current = null;
       socketIdToUserIdMap.current = {};
@@ -422,32 +389,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       setLocalVideoOn(true);
       console.log('Client: Media stream obtained manually.');
 
-      for (const peerUserId in peerConnections.current) {
-        const pc = peerConnections.current[peerUserId];
-        const peerSocketId = userIdToSocketIdMap.current[peerUserId];
-        
-        if (!pc || !peerSocketId) continue;
+      if (mediaRecorderRef.current) {
+        mediaRecorderRef.current.stop();
+      }
+      if (socketRef.current && stream) {
+        const options = { mimeType: 'video/webm; codecs=vp8,opus' };
+        const mediaRecorder = new MediaRecorder(stream, options);
 
-        for (const track of stream.getTracks()) {
-          const sender = pc.getSenders().find(s => s.track?.kind === track.kind);
-          if (sender) {
-            await sender.replaceTrack(track);
-          } else {
-            pc.addTrack(track, stream);
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0 && socketRef.current) {
+            socketRef.current.emit('media-chunk', event.data);
           }
-        }
-
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socketRef.current?.emit('offer', { 
-            to: peerSocketId, 
-            offer: pc.localDescription 
-          });
-          console.log(`Client: Sent renegotiation offer to ${peerUserId}`);
-        } catch (err) {
-          console.error(`Error during renegotiation for ${peerUserId}:`, err);
-        }
+        };
+        mediaRecorderRef.current = mediaRecorder;
+        mediaRecorder.start(1500); // 1.5초 timeslice로 변경하여 부하 감소
       }
 
       socketRef.current?.emit('camera-state-changed', { 
@@ -462,8 +417,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const leaveRoom = () => {
     console.log('Client: Leaving room');
+    mediaRecorderRef.current?.stop();
     localStreamRef.current?.getTracks().forEach(track => track.stop());
-    Object.values(peerConnections.current).forEach(pc => pc.close());
     socketRef.current?.disconnect();
     router.push('/');
   };
