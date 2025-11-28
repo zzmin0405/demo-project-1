@@ -144,11 +144,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
 
   useEffect(() => {
-    const savedSetting = localStorage.getItem('exitImmediately') === 'true';
-    setExitImmediately(savedSetting);
-  }, []);
-
-  useEffect(() => {
     if (status === 'loading') return;
     if (!session?.user) {
       console.log('Client: No user found, redirecting to login.');
@@ -174,8 +169,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
     socketRef.current = socket;
 
-
-
     const initialize = async () => {
       console.log('Client: Initializing...');
 
@@ -197,7 +190,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.connect();
 
+      const lastConnectTimeRef = { current: 0 }; // Local ref for debounce within closure
+
       socket.on('connect', () => {
+        const now = Date.now();
+        if (now - lastConnectTimeRef.current < 1000) {
+          console.log('Client: Ignoring rapid reconnect event.');
+          return;
+        }
+        lastConnectTimeRef.current = now;
+
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
 
         // Check if we are reconnecting (stream already exists)
@@ -222,6 +224,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             userId: currentUserId,
             isMuted: isMutedRef.current
           });
+
+          // Restart MediaRecorder if needed (sometimes it stops on disconnect)
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
+            console.log('Client: Restarting MediaRecorder after reconnect.');
+            mediaRecorderRef.current.start(300);
+          }
           return;
         }
 
@@ -234,25 +242,23 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
 
         // Initialize media stream after joining (or in parallel)
-        // We need to read the settings again or pass them. 
-        // Since we are inside initialize, we can read from sessionStorage if needed, 
-        // but it's better to rely on the state that was set by the first useEffect.
-        // However, state updates might not be reflected yet if this runs immediately.
-        // Let's read from sessionStorage directly here for safety.
         let initialVideoOn = false;
         let initialMuted = true;
 
         if (typeof window !== 'undefined') {
           const storedSettings = sessionStorage.getItem(`meeting-settings-${roomId}`);
           if (storedSettings) {
-            const settings = JSON.parse(storedSettings);
-            if (settings.joinVideoOff !== undefined) initialVideoOn = !settings.joinVideoOff;
-            if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
+            try {
+              const settings = JSON.parse(storedSettings);
+              if (settings.joinVideoOff !== undefined) initialVideoOn = !settings.joinVideoOff;
+              if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
+            } catch (e) {
+              console.error("Error parsing stored settings", e);
+            }
           }
         }
 
         initializeMediaStream(initialVideoOn, initialMuted, true); // isInitial = true
-
       });
 
       socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string }) => {
@@ -361,8 +367,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             hasVideo: localVideoOn,
             isMuted: isMuted
           });
-          // Optional: Retry sending the message after a short delay?
-          // For now, just let the user retry or rely on the next message.
         } else {
           alert(`채팅 전송 실패: ${data.message}`);
         }
