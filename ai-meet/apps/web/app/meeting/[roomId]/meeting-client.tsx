@@ -773,7 +773,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <div className="w-full h-full flex items-center justify-center bg-black/90">
           {isLocal ? (
             <video
-              ref={localVideoRef}
+              ref={el => {
+                localVideoRef.current = el;
+                if (el && localStream) {
+                  el.srcObject = localStream;
+                }
+              }}
               autoPlay
               muted
               playsInline
