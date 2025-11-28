@@ -89,6 +89,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const sourceBuffersRef = useRef<{ [socketId: string]: SourceBuffer }>({});
   const localMimeTypeRef = useRef<string | null>(null);
   const chunkQueueRef = useRef<{ [socketId: string]: Blob[] }>({});
+  const initSegmentRef = useRef<Blob | null>(null);
+  const hasReceivedInitSegmentRef = useRef<{ [socketId: string]: boolean }>({});
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
   const [showEndCallModal, setShowEndCallModal] = useState(false);
@@ -136,8 +138,19 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         mediaRecorder.ondataavailable = (event) => {
           if (event.data && event.data.size > 0) {
             if (socketRef.current && socketRef.current.connected) {
-              console.log('Sending media chunk:', event.data.size); // Uncomment for verbose logging
-              socketRef.current.emit('media-chunk', event.data);
+              // Capture Init Segment (first chunk)
+              let isInit = false;
+              if (!initSegmentRef.current) {
+                initSegmentRef.current = event.data;
+                isInit = true;
+                console.log('Captured Init Segment, size:', event.data.size);
+              }
+
+              console.log(`Sending media chunk: ${event.data.size}, isInit: ${isInit}`);
+              socketRef.current.emit('media-chunk', {
+                chunk: event.data,
+                isInit: isInit
+              });
             } else {
               console.warn('Socket not connected, dropping media chunk');
             }
@@ -260,6 +273,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     delete mediaSourcesRef.current[socketId];
     delete sourceBuffersRef.current[socketId];
     delete chunkQueueRef.current[socketId];
+    delete hasReceivedInitSegmentRef.current[socketId];
   };
 
   const initializeMediaStream = useCallback(async (requestVideo: boolean = false, requestMuted: boolean = true, isInitial: boolean = false) => {
@@ -449,23 +463,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(filteredParticipants);
       });
 
-      socket.on('user-joined', async (data: Participant & { socketId: string }) => {
-        if (data.userId === currentUserId) return;
-        socketIdToUserIdMap.current[data.socketId] = data.userId;
-        userIdToSocketIdMap.current[data.userId] = data.socketId;
-        setParticipants(prev => [...prev, data]);
-      });
-
-      socket.on('user-left', (data: { userId: string }) => {
-        const socketId = userIdToSocketIdMap.current[data.userId];
-        if (socketId) {
-          cleanupMediaSource(socketId);
-          delete socketIdToUserIdMap.current[socketId];
-          delete userIdToSocketIdMap.current[data.userId];
-        }
-        setParticipants(prev => prev.filter(p => p.userId !== data.userId));
-      });
-
       socket.on('camera-state-changed', (data: { userId: string, hasVideo: boolean }) => {
         setParticipants(prev => prev.map(p => {
           if (p.userId === data.userId) {
@@ -483,12 +480,35 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
-        const { socketId, chunk } = data;
-        console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength}`);
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer, isInit: boolean }) => {
+        const { socketId, chunk, isInit } = data;
+        // console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength}, isInit: ${isInit}`);
         const blob = new Blob([chunk], { type: 'video/webm' });
         const sourceBuffer = sourceBuffersRef.current[socketId];
         const mediaSource = mediaSourcesRef.current[socketId];
+
+        if (isInit) {
+          console.log(`Received Init Segment from ${socketId}, size: ${chunk.byteLength}`);
+          hasReceivedInitSegmentRef.current[socketId] = true;
+
+          if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
+            try {
+              sourceBuffer.appendBuffer(await blob.arrayBuffer());
+            } catch (e) {
+              console.error(`Error appending Init Segment for ${socketId}`, e);
+            }
+          }
+          return;
+        }
+
+        if (!hasReceivedInitSegmentRef.current[socketId]) {
+          // console.warn(`Waiting for Init Segment from ${socketId}, queuing chunk...`);
+          if (!chunkQueueRef.current[socketId]) {
+            chunkQueueRef.current[socketId] = [];
+          }
+          chunkQueueRef.current[socketId].push(blob);
+          return;
+        }
 
         if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
           try {
