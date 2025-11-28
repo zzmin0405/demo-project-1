@@ -51,13 +51,17 @@ export async function DELETE(
         });
 
         if (!response.ok) {
-            console.error('Failed to delete meeting via backend:', await response.text());
-            return NextResponse.json({ error: 'Failed to delete meeting on backend' }, { status: 500 });
+            const errorText = await response.text();
+            console.error('Failed to delete meeting via backend:', errorText);
+            return NextResponse.json({ error: `Backend Error: ${response.status} - ${errorText}` }, { status: 500 });
         }
 
         return NextResponse.json({ success: true });
     } catch (error) {
         console.error('Error deleting meeting:', error);
-        return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+        return NextResponse.json({
+            error: `Internal Error: ${error instanceof Error ? error.message : String(error)}`,
+            backendUrl: process.env.BACKEND_URL || 'http://localhost:3002 (Default)'
+        }, { status: 500 });
     }
 }

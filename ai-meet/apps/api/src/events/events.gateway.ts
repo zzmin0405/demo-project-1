@@ -475,4 +475,41 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       emoji: data.emoji
     });
   }
+
+  // --- Public Methods for Controller ---
+
+  public async forceDeleteRoom(roomId: string): Promise<void> {
+    // 1. Notify all users in the room that the meeting has ended
+    this.server.to(roomId).emit('meeting-ended', { reason: 'Host deleted the meeting' });
+
+    // 2. Disconnect all sockets in the room
+    const sockets = await this.server.in(roomId).fetchSockets();
+    sockets.forEach(socket => {
+      socket.leave(roomId);
+      socket.disconnect(true);
+    });
+
+    // 3. Cleanup local state
+    this.roomToUsers.delete(roomId);
+    console.log(`Force deleted room ${roomId} and kicked all participants.`);
+  }
+
+  public async leaveRoomByUserId(roomId: string, userId: string): Promise<void> {
+    // Find socket for user
+    const roomUsers = this.roomToUsers.get(roomId);
+    if (!roomUsers) return;
+
+    const socketId = Array.from(roomUsers.entries()).find(([_, p]) => p.userId === userId)?.[0];
+    if (socketId) {
+      const socket = this.server.sockets.sockets.get(socketId);
+      if (socket) {
+        socket.leave(roomId);
+        socket.emit('kicked', { reason: 'You have been removed from the meeting.' });
+        socket.disconnect(true);
+      }
+
+      // Cleanup state
+      this.handleDisconnect({ id: socketId } as Socket);
+    }
+  }
 }
