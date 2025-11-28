@@ -165,12 +165,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
-      transports: ['websocket', 'polling'], // Allow fallback
-      reconnection: true,
-      reconnectionAttempts: Infinity, // Keep trying to reconnect
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 20000, // Connection timeout
       extraHeaders: {
         'ngrok-skip-browser-warning': 'true'
       },
