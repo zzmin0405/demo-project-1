@@ -372,6 +372,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       setParticipants([]);
       isInitialized.current = false; // Allow re-initialization on remount
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, router, session, status]);
 
   // Handle browser tab close / refresh
