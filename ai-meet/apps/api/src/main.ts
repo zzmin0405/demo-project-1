@@ -11,6 +11,7 @@ async function bootstrap() {
     app.enableCors({
       origin: true,
       credentials: true,
+      allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
     });
     console.log(`CORS enabled for origins: ${corsOrigin}`);
   } else {

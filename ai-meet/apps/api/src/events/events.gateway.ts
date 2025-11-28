@@ -24,6 +24,7 @@ interface Participant {
     origin: true,
     credentials: true,
     methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
   },
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
