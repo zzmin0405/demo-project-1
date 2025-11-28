@@ -9,11 +9,7 @@ async function bootstrap() {
 
   if (corsOrigin) {
     app.enableCors({
-      origin: [
-        'http://localhost:3000',
-        'https://demo-project-1-rho.vercel.app',
-        'https://demo-project-1.vercel.app'
-      ],
+      origin: true,
       credentials: true,
     });
     console.log(`CORS enabled for origins: ${corsOrigin}`);

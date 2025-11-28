@@ -498,6 +498,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
+      socket.on('chat-message', (data: { userId: string, username: string, message: string, timestamp: string, avatar_url?: string }) => {
+        setChatMessages(prev => [...prev, data]);
+        if (!showChatPanel) {
+          // Optional: Add unread count or notification logic here if needed
+        }
+      });
+
       socket.on('media-mime-type', (data: { socketId: string, mimeType: string }) => {
         mimeTypesRef.current[data.socketId] = data.mimeType;
         const userId = socketIdToUserIdMap.current[data.socketId];
@@ -774,7 +781,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <div className="w-full h-full flex items-center justify-center bg-black/90">
           {isLocal ? (
             <video
-              ref={localVideoRef}
+              ref={el => {
+                localVideoRef.current = el;
+                if (el && localStream) {
+                  el.srcObject = localStream;
+                }
+              }}
               autoPlay
               muted
               playsInline
