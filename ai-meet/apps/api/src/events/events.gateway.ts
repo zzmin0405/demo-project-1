@@ -370,12 +370,23 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
   @SubscribeMessage('media-chunk')
   handleMediaChunk(client: Socket, chunk: Buffer): void {
-    const [socketId, roomId] = Array.from(client.rooms);
+    const roomId = Array.from(client.rooms).find(r => r !== client.id);
 
     if (roomId) {
       client.to(roomId).emit('media-chunk', {
         socketId: client.id,
         chunk: chunk,
+      });
+    }
+  }
+
+  @SubscribeMessage('media-mime-type')
+  handleMediaMimeType(client: Socket, data: { mimeType: string }): void {
+    const roomId = Array.from(client.rooms).find(r => r !== client.id);
+    if (roomId) {
+      client.to(roomId).emit('media-mime-type', {
+        socketId: client.id,
+        mimeType: data.mimeType,
       });
     }
   }
