@@ -41,7 +41,7 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
 
     return (
         <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-            <DialogContent className="sm:max-w-[500px] border-border/50 bg-background/95 backdrop-blur-xl shadow-2xl">
+            <DialogContent className="sm:max-w-[600px] border-border/50 bg-background/95 backdrop-blur-xl shadow-2xl">
                 <DialogHeader>
                     <DialogTitle className="text-2xl font-bold bg-gradient-to-r from-primary to-purple-500 bg-clip-text text-transparent">
                         {dict.modal.title}
@@ -51,8 +51,8 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
                     </DialogDescription>
                 </DialogHeader>
 
-                <div className="grid gap-6 py-4">
-                    <div className="grid gap-2">
+                <div className="grid gap-8 py-6">
+                    <div className="grid gap-3">
                         <Label htmlFor="title" className="text-sm font-medium text-muted-foreground">
                             {dict.modal.topicLabel}
                         </Label>
@@ -61,46 +61,46 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
                             value={title}
                             onChange={(e) => setTitle(e.target.value)}
                             placeholder={dict.modal.topicPlaceholder}
-                            className="bg-secondary/50 border-border/50 focus:border-primary/50 transition-all"
+                            className="bg-secondary/50 border-border/50 focus:border-primary/50 transition-all h-11"
                         />
                     </div>
 
-                    <div className="space-y-4">
+                    <div className="space-y-5">
                         <h4 className="text-sm font-medium text-muted-foreground flex items-center gap-2">
                             <Settings2 className="w-4 h-4" /> {dict.modal.optionsTitle}
                         </h4>
 
-                        <div className="grid gap-4 p-4 rounded-xl bg-secondary/30 border border-border/50">
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <Label className="text-base flex items-center gap-2">
-                                        <MessageSquare className="w-4 h-4 text-blue-400" /> {dict.modal.saveChat}
+                        <div className="grid gap-10 p-12 rounded-3xl bg-secondary/40 border border-border/50 shadow-inner">
+                            <div className="flex items-center justify-between gap-8">
+                                <div className="space-y-1">
+                                    <Label className="text-lg flex items-center gap-3">
+                                        <MessageSquare className="w-5 h-5 text-blue-400" /> {dict.modal.saveChat}
                                     </Label>
-                                    <p className="text-xs text-muted-foreground">
+                                    <p className="text-sm text-muted-foreground">
                                         {dict.modal.saveChatDesc}
                                     </p>
                                 </div>
                                 <Switch checked={isChatSaved} onCheckedChange={setIsChatSaved} />
                             </div>
 
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <Label className="text-base flex items-center gap-2">
-                                        <Mic className="w-4 h-4 text-red-400" /> {dict.modal.muteEntry}
+                            <div className="flex items-center justify-between gap-8">
+                                <div className="space-y-1">
+                                    <Label className="text-lg flex items-center gap-3">
+                                        <Mic className="w-5 h-5 text-red-400" /> {dict.modal.muteEntry}
                                     </Label>
-                                    <p className="text-xs text-muted-foreground">
+                                    <p className="text-sm text-muted-foreground">
                                         {dict.modal.muteEntryDesc}
                                     </p>
                                 </div>
                                 <Switch checked={joinMuted} onCheckedChange={setJoinMuted} />
                             </div>
 
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <Label className="text-base flex items-center gap-2">
-                                        <Video className="w-4 h-4 text-purple-400" /> {dict.modal.videoOffEntry}
+                            <div className="flex items-center justify-between gap-8">
+                                <div className="space-y-1">
+                                    <Label className="text-lg flex items-center gap-3">
+                                        <Video className="w-5 h-5 text-purple-400" /> {dict.modal.videoOffEntry}
                                     </Label>
-                                    <p className="text-xs text-muted-foreground">
+                                    <p className="text-sm text-muted-foreground">
                                         {dict.modal.videoOffEntryDesc}
                                     </p>
                                 </div>

@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { ChatPanel } from "@/components/meeting/chat-panel";
 import { ReactionBar } from "@/components/meeting/reaction-bar";
 import { ReactionOverlay, Reaction } from "@/components/meeting/reaction-overlay";
+import { SettingsModal } from "@/components/meeting/settings-modal";
 
 interface Participant {
   userId: string;
@@ -45,8 +46,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const [meetingTitle, setMeetingTitle] = useState("Meeting Room");
   const [isHost, setIsHost] = useState(false);
-  const [isEditingTitle, setIsEditingTitle] = useState(false);
-  const [tempTitle, setTempTitle] = useState("");
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   // Reaction State
   const [reactions, setReactions] = useState<Reaction[]>([]);
@@ -843,13 +843,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     setNewMessage('');
   };
 
-  const handleTitleUpdate = () => {
-    if (!tempTitle.trim() || tempTitle === meetingTitle) {
-      setIsEditingTitle(false);
-      return;
-    }
-    socketRef.current?.emit('update-meeting-title', { roomId, title: tempTitle });
-    setIsEditingTitle(false);
+  const handleTitleChange = (newTitle: string) => {
+    socketRef.current?.emit('update-meeting-title', { roomId, title: newTitle });
   };
 
   const handleSendReaction = (emoji: string) => {
@@ -912,19 +907,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs md:text-sm text-white font-medium backdrop-blur-sm flex items-center gap-2">
           <span>
             {participant.username} {isLocal && "(You)"}
-            {/* Host Badge - We need to know if this participant is the host. 
-                We don't have isHost prop on participant object directly here unless we pass it or check ID.
-                Let's assume we can check against a hostId state if available, or if the participant object has a role.
-                For now, we'll check if participant.userId matches the known hostId (which we need to store in state).
-            */}
-            {/* Since we don't have hostId in this scope easily without prop drilling or context, 
-                let's assume the parent passes a way to know, or we rely on the fact that we set isHost state for local user.
-                But for remote users? We need to know who the host is. 
-                Let's add `hostId` to the component state and pass it down or check it here.
-                Actually, `meeting-client` has `isHost` state, but that's only for the local user.
-                We need to know the hostId to label others.
-                Let's update the component to accept `isHostUser` prop.
-            */}
             {/* Temporary fix: We will update the ParticipantCard usage to pass isHostUser */}
           </span>
           {/* Mute Status Icon */}
@@ -969,79 +951,58 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
 
   return (
-    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative" >
+    <div className="fixed inset-0 bg-background text-foreground overflow-hidden" >
 
-      {/* Top Bar (View Switcher) */}
-      < div className={
-        cn(
-          "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
-          showControls ? "translate-y-0" : "-translate-y-full"
-        )
-      } >
-        <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
-          {isEditingTitle ? (
-            <Input
-              autoFocus
-              value={tempTitle}
-              onChange={(e) => setTempTitle(e.target.value)}
-              onBlur={handleTitleUpdate}
-              onKeyDown={(e) => e.key === 'Enter' && handleTitleUpdate()}
-              className="h-6 w-48 bg-transparent border-none text-white focus-visible:ring-0 p-0"
-            />
-          ) : (
-            <span
-              onClick={() => {
-                if (isHost) {
-                  setTempTitle(meetingTitle);
-                  setIsEditingTitle(true);
-                }
-              }}
-              className={cn(isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
-              title={isHost ? "Click to edit title" : undefined}
-            >
-              {meetingTitle}
-            </span>
-          )}
-          {isHost && !isEditingTitle && (
-            <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
-              setTempTitle(meetingTitle);
-              setIsEditingTitle(true);
-            }} />
-          )}
-          <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
-        </div>
-        <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
-          <Button
-            variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="text-white hover:bg-white/20"
-            onClick={() => setLayoutMode('speaker')}
-          >
-            <Maximize className="w-4 h-4 mr-2" /> Speaker
-          </Button>
-          <Button
-            variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="text-white hover:bg-white/20"
-            onClick={() => setLayoutMode('grid')}
-          >
-            <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
-          </Button>
-        </div>
-      </div >
-
-      <div className="flex flex-1 overflow-hidden relative">
+      <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row h-full">
         <ReactionOverlay reactions={reactions} />
         {/* Main Content Area */}
-        <main className={cn(
-          "flex-1 bg-neutral-900 relative p-4 flex items-center justify-center transition-all duration-300",
-          showChatPanel ? "mr-0" : "mr-0"
-        )}>
+        <main
+          className="flex-1 bg-neutral-900 relative p-4 flex items-center justify-center transition-all duration-300 overflow-hidden group min-h-0"
+          onMouseEnter={() => setShowControls(true)}
+          onMouseLeave={() => setShowControls(false)}
+        >
+
+          {/* Top Bar (View Switcher) - Moved inside Main */}
+          <div className={
+            cn(
+              "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
+              showControls ? "translate-y-0" : "-translate-y-full"
+            )
+          }>
+            <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
+              <span className="font-semibold px-2">{meetingTitle}</span>
+              {isHost && (
+                <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-white" onClick={() => setShowSettingsModal(true)}>
+                  <Settings className="w-3 h-3" />
+                </Button>
+              )}
+              <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
+            </div>
+            <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
+              <Button
+                variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="text-white hover:bg-white/20"
+                onClick={() => setLayoutMode('speaker')}
+              >
+                <Maximize className="w-4 h-4 mr-2" /> Speaker
+              </Button>
+              <Button
+                variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
+                size="sm"
+                className="text-white hover:bg-white/20"
+                onClick={() => setLayoutMode('grid')}
+              >
+                <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
+              </Button>
+            </div>
+          </div>
+
           {layoutMode === 'speaker' ? (
             // Speaker View
-            <div className="w-full h-full flex flex-col md:flex-row gap-4">
+            <div className="w-full h-full flex flex-col md:flex-row gap-4 pt-14 min-h-0">
               {/* Main Stage */}
-              <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl">
+              <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl min-h-0">
                 {mainSpeaker ? (
                   <ParticipantCard
                     participant={mainSpeaker}
@@ -1058,7 +1019,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               </div>
               {/* Filmstrip */}
               {(participants.length > 0) && (
-                <div className="h-32 md:h-full md:w-48 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide">
+                <div className="h-32 md:h-full md:w-48 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide min-h-0">
                   {mainSpeaker && (
                     <ParticipantCard
                       participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
@@ -1080,109 +1041,105 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           ) : (
             // Grid View
             <div className={cn(
-              "w-full h-full grid gap-4 p-4 overflow-y-auto auto-rows-fr",
-              (participants.length + 1) <= 1 ? "grid-cols-1" :
-                (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2" :
-                  (participants.length + 1) <= 4 ? "grid-cols-2" :
-                    (participants.length + 1) <= 9 ? "grid-cols-2 md:grid-cols-3" :
-                      "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
+              "w-full h-full grid gap-4 p-4 pt-14 min-h-0",
+              (participants.length + 1) <= 1 ? "grid-cols-1 grid-rows-1" :
+                (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2 grid-rows-2 md:grid-rows-1" :
+                  (participants.length + 1) <= 4 ? "grid-cols-2 grid-rows-2" :
+                    (participants.length + 1) <= 6 ? "grid-cols-2 md:grid-cols-3 grid-rows-3 md:grid-rows-2" :
+                      (participants.length + 1) <= 9 ? "grid-cols-2 md:grid-cols-3 grid-rows-5 md:grid-rows-3" :
+                        "grid-cols-2 md:grid-cols-3 lg:grid-cols-4 auto-rows-fr"
             )}>
               <ParticipantCard
                 participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
                 isLocal={true}
+                className="min-h-0"
               />
               {participants.map(p => (
                 <ParticipantCard
                   key={p.userId}
                   participant={p}
                   isPinned={p.userId === pinnedUserId}
+                  className="min-h-0"
                 />
               ))}
             </div>
           )}
+          {/* Reaction Bar */}
+          <div className={cn(
+            "absolute bottom-24 left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-300",
+            showControls ? "opacity-100" : "opacity-0 pointer-events-none"
+          )}>
+            <ReactionBar onReaction={handleSendReaction} />
+          </div>
+
+          {/* Control Bar - Fixed Floating Pill */}
+          <div className={cn(
+            "fixed bottom-8 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-4 bg-black/80 backdrop-blur-xl border border-white/10 rounded-full px-6 py-3 shadow-2xl",
+            showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
+          )}>
+            <Button
+              variant={isMuted ? "destructive" : "secondary"}
+              size="icon"
+              className="rounded-full w-12 h-12"
+              onClick={toggleMute}
+            >
+              {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            </Button>
+
+            <Button
+              variant={localVideoOn ? "secondary" : "destructive"}
+              size="icon"
+              className="rounded-full w-12 h-12"
+              onClick={toggleCamera}
+            >
+              {localVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+            </Button>
+
+            <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowMorePanel(true)}>
+              <Settings className="w-5 h-5" />
+            </Button>
+
+            <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowParticipantsPanel(true)}>
+              <Users className="w-5 h-5" />
+            </Button>
+
+            <Button
+              variant={showChatPanel ? "default" : "secondary"}
+              size="icon"
+              className="rounded-full w-12 h-12"
+              onClick={() => setShowChatPanel(!showChatPanel)}
+            >
+              <MessageSquare className="w-5 h-5" />
+            </Button>
+
+            <div className="w-px h-8 bg-white/20 mx-2" />
+
+            <Button
+              variant="destructive"
+              className="rounded-full px-6 h-12 font-semibold bg-red-600 hover:bg-red-700"
+              onClick={handleEndCallClick}
+            >
+              End Call
+            </Button>
+          </div>
         </main>
 
-        {/* Chat Panel (Right Sidebar) */}
+        {/* Chat Panel (Right Sidebar on Desktop, Bottom on Mobile) */}
         {showChatPanel && (
-          <ChatPanel
-            messages={chatMessages}
-            currentUserId={(session?.user as { id?: string })?.id || session?.user?.email}
-            newMessage={newMessage}
-            onNewMessageChange={setNewMessage}
-            onSendMessage={sendMessage}
-            onClose={() => setShowChatPanel(false)}
-          />
+          <div className="w-full h-[50vh] md:w-96 md:h-full border-t md:border-t-0 md:border-l bg-background flex-shrink-0 transition-all duration-300 z-30">
+            <ChatPanel
+              messages={chatMessages}
+              currentUserId={(session?.user as { id?: string })?.id || session?.user?.email}
+              newMessage={newMessage}
+              onNewMessageChange={setNewMessage}
+              onSendMessage={sendMessage}
+              onClose={() => setShowChatPanel(false)}
+            />
+          </div>
         )}
       </div>
 
-      {/* Control Bar Toggle Button */}
-      <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 flex flex-col items-center gap-4"
-        style={{ bottom: showControls ? '80px' : '20px' }}>
-
-        {showControls && (
-          <ReactionBar onReaction={handleSendReaction} />
-        )}
-
-        <Button
-          variant="secondary"
-          size="sm"
-          className="rounded-full shadow-lg bg-background/80 backdrop-blur-sm border hover:bg-background"
-          onClick={() => setShowControls(!showControls)}
-        >
-          {showControls ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
-        </Button>
-      </div>
-
-      {/* Control Bar */}
-      <div className={cn(
-        "fixed bottom-0 left-0 right-0 h-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t z-40 transition-transform duration-300 ease-in-out flex items-center justify-center space-x-4",
-        showControls ? "translate-y-0" : "translate-y-full"
-      )}>
-        <Button
-          variant={isMuted ? "destructive" : "secondary"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={toggleMute}
-        >
-          {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-        </Button>
-
-        <Button
-          variant={localVideoOn ? "secondary" : "destructive"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={toggleCamera}
-        >
-          {localVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-        </Button>
-
-        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowMorePanel(true)}>
-          <Settings className="w-5 h-5" />
-        </Button>
-
-        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowParticipantsPanel(true)}>
-          <Users className="w-5 h-5" />
-        </Button>
-
-        <Button
-          variant={showChatPanel ? "default" : "secondary"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={() => setShowChatPanel(!showChatPanel)}
-        >
-          <MessageSquare className="w-5 h-5" />
-        </Button>
-
-        <div className="w-px h-8 bg-border mx-2" />
-
-        <Button
-          variant="destructive"
-          className="rounded-full px-6 h-12 font-semibold bg-red-600 hover:bg-red-700"
-          onClick={handleEndCallClick}
-        >
-          End Call
-        </Button>
-      </div>
+      {/* Controls moved inside main */}
 
 
       {/* Participants Panel (Modal) */}
@@ -1339,6 +1296,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           </div>
         )
       }
-    </div >
+      <SettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        currentTitle={meetingTitle}
+        onTitleChange={handleTitleChange}
+        isHost={isHost}
+      />
+    </div>
   );
 }

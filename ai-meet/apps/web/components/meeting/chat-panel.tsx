@@ -45,7 +45,7 @@ export function ChatPanel({
     }, [messages]);
 
     return (
-        <div className="flex flex-col h-full bg-card border-l border-border w-80 md:w-96 shadow-xl transition-all duration-300">
+        <div className="flex flex-col h-full bg-card w-full shadow-xl transition-all duration-300">
             <div className="p-4 border-b flex justify-between items-center bg-secondary/20">
                 <h3 className="font-bold text-lg">Chat</h3>
                 <Button variant="ghost" size="icon" onClick={onClose}>

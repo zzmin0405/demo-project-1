@@ -85,7 +85,7 @@ export default function Home() {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-background to-secondary/20 relative">
+    <div className="flex items-center justify-center h-screen overflow-hidden bg-gradient-to-br from-background to-secondary/20 relative">
       <div className="absolute top-4 right-4">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

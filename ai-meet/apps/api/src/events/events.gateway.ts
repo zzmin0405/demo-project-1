@@ -21,7 +21,13 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: '*', // For development only. Restrict this in production.
+    origin: [
+      'http://localhost:3000',
+      'https://demo-project-1-rho.vercel.app',
+      'https://demo-project-1.vercel.app'
+    ],
+    credentials: true,
+    methods: ['GET', 'POST'],
   },
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {

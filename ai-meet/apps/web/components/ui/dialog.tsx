@@ -9,7 +9,7 @@ const Dialog = ({ children, open, onOpenChange }: { children: React.ReactNode, o
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div className="fixed inset-0 bg-black/80 backdrop-blur-sm transition-opacity" onClick={() => onOpenChange?.(false)} />
-            <div className="z-50 w-full max-w-lg scale-100 gap-4 border bg-background p-6 shadow-lg duration-200 sm:rounded-lg">
+            <div className="z-50 flex w-full items-center justify-center p-4">
                 {children}
             </div>
         </div>
@@ -20,7 +20,7 @@ const DialogContent = React.forwardRef<
     HTMLDivElement,
     React.HTMLAttributes<HTMLDivElement>
 >(({ className, children, ...props }, ref) => (
-    <div ref={ref} className={cn("grid gap-4", className)} {...props}>
+    <div ref={ref} className={cn("grid w-full max-w-lg gap-6 border bg-background p-10 shadow-lg duration-200 sm:rounded-xl", className)} {...props}>
         {children}
     </div>
 ))
