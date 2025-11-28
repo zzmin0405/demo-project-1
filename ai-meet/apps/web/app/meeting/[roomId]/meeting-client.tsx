@@ -568,7 +568,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       // --- Audio Processing for Volume Control ---
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioContextClass = window.AudioContext || (window as unknown as Window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioContext = new AudioContextClass();
       const source = audioContext.createMediaStreamSource(stream);
       const gainNode = audioContext.createGain();
@@ -631,7 +631,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         try {
           // Retry without specific deviceId to be safe
-          const stream = await navigator.mediaDevices.getUserMedia({
+          await navigator.mediaDevices.getUserMedia({
             video: true,
             audio: selectedAudioInputDeviceId ? { deviceId: { exact: selectedAudioInputDeviceId } } : true
           });
@@ -1103,7 +1103,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         {showChatPanel && (
           <ChatPanel
             messages={chatMessages}
-            currentUserId={(session?.user as any)?.id || session?.user?.email}
+            currentUserId={(session?.user as { id?: string })?.id || session?.user?.email}
             newMessage={newMessage}
             onNewMessageChange={setNewMessage}
             onSendMessage={sendMessage}

@@ -10,7 +10,7 @@ const DropdownMenu = ({ children }: { children: React.ReactNode }) => {
         <div className="relative inline-block text-left" onMouseLeave={() => setIsOpen(false)}>
             {React.Children.map(children, child => {
                 if (React.isValidElement(child)) {
-                    // @ts-ignore
+                    // @ts-expect-error - Injected props
                     return React.cloneElement(child, { isOpen, setIsOpen });
                 }
                 return child;
@@ -18,37 +18,24 @@ const DropdownMenu = ({ children }: { children: React.ReactNode }) => {
         </div>
     )
 }
-
-const DropdownMenuTrigger = React.forwardRef<
-    HTMLButtonElement,
-    React.ButtonHTMLAttributes<HTMLButtonElement> & { asChild?: boolean, isOpen?: boolean, setIsOpen?: (open: boolean) => void }
->(({ className, children, isOpen, setIsOpen, asChild, ...props }, ref) => {
-    const Comp = asChild ? React.Fragment : "button";
-    const child = React.Children.only(children) as React.ReactElement;
-
-    if (asChild && React.isValidElement(child)) {
-        return React.cloneElement(child, {
-            // @ts-ignore
-            onClick: (e: React.MouseEvent) => {
-                // @ts-ignore
-                child.props.onClick?.(e);
-                setIsOpen?.(!isOpen);
+child.props.onClick?.(e);
+setIsOpen?.(!isOpen);
             },
-            // @ts-ignore
-            ref
+// @ts-expect-error - Injected props
+ref
         });
     }
 
-    return (
-        <button
-            ref={ref}
-            onClick={() => setIsOpen?.(!isOpen)}
-            className={cn(className)}
-            {...props}
-        >
-            {children}
-        </button>
-    )
+return (
+    <button
+        ref={ref}
+        onClick={() => setIsOpen?.(!isOpen)}
+        className={cn(className)}
+        {...props}
+    >
+        {children}
+    </button>
+)
 })
 DropdownMenuTrigger.displayName = "DropdownMenuTrigger"
 
