@@ -489,7 +489,31 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       console.log(`setupMediaRecorder: Starting with ${videoTracks.length} video tracks and ${audioTracks.length} audio tracks.`);
 
-      const options = { mimeType: 'video/webm; codecs=vp8,opus' };
+      const mimeTypes = [
+        'video/webm; codecs=vp8,opus',
+        'video/webm; codecs=vp9,opus',
+        'video/webm; codecs=h264,opus',
+        'video/mp4', // Safari 14.1+
+        '' // Default
+      ];
+
+      let options: MediaRecorderOptions = {};
+      let selectedMimeType = '';
+
+      for (const mimeType of mimeTypes) {
+        if (!mimeType) {
+          selectedMimeType = 'default';
+          break;
+        }
+        if (MediaRecorder.isTypeSupported(mimeType)) {
+          selectedMimeType = mimeType;
+          options = { mimeType };
+          break;
+        }
+      }
+
+      console.log(`setupMediaRecorder: Selected mimeType: ${selectedMimeType}`);
+
       try {
         const mediaRecorder = new MediaRecorder(stream, options);
 
