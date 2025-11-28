@@ -9,13 +9,21 @@ async function bootstrap() {
 
   if (corsOrigin) {
     app.enableCors({
-      origin: '*',
-      credentials: false,
+      origin: true,
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+      exposedHeaders: ['Access-Control-Allow-Origin'],
     });
     console.log(`CORS enabled for origins: ${corsOrigin}`);
   } else {
-    app.enableCors(); // Default (allows all, but credentials might be limited)
+    app.enableCors({
+      origin: true,
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+      exposedHeaders: ['Access-Control-Allow-Origin'],
+    });
     console.log('CORS enabled for ALL origins (Development Mode)');
   }
   const port = configService.get<number>('PORT') || 3002;

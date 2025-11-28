@@ -1,4 +1,4 @@
-import { UseGuards } from '@nestjs/common';
+﻿import { UseGuards } from '@nestjs/common';
 import {
   OnGatewayConnection,
   OnGatewayDisconnect,
@@ -21,13 +21,8 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: true,
-    credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
-    exposedHeaders: ['Access-Control-Allow-Origin'],
+    origin: '*', // For development only. Restrict this in production.
   },
-  transports: ['websocket', 'polling'],
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(private prisma: PrismaService) { }
@@ -369,7 +364,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
   @SubscribeMessage('media-chunk')
   handleMediaChunk(client: Socket, chunk: Buffer): void {
-    const roomId = Array.from(client.rooms).find(r => r !== client.id);
+    const [socketId, roomId] = Array.from(client.rooms);
 
     if (roomId) {
       client.to(roomId).emit('media-chunk', {
@@ -378,8 +373,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
     }
   }
-
-
 
   // WebRTC Signaling Handlers
   @SubscribeMessage('offer')

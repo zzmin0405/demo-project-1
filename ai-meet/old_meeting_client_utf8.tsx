@@ -16,7 +16,6 @@ import { cn } from "@/lib/utils";
 import { ChatPanel } from "@/components/meeting/chat-panel";
 import { ReactionBar } from "@/components/meeting/reaction-bar";
 import { ReactionOverlay, Reaction } from "@/components/meeting/reaction-overlay";
-import { SettingsModal } from "@/components/meeting/settings-modal";
 
 interface Participant {
   userId: string;
@@ -34,9 +33,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoOn, setLocalVideoOn] = useState(false);
-  const localVideoOnRef = useRef(false);
   const [isMuted, setIsMuted] = useState(true);
-  const isMutedRef = useRef(true);
   const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState<string | null>(null);
   const [availableVideoDevices, setAvailableVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [availableAudioInputDevices, setAvailableAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
@@ -48,7 +45,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const [meetingTitle, setMeetingTitle] = useState("Meeting Room");
   const [isHost, setIsHost] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [tempTitle, setTempTitle] = useState("");
 
   // Reaction State
   const [reactions, setReactions] = useState<Reaction[]>([]);
@@ -68,8 +66,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [chatMessages, setChatMessages] = useState<{ userId: string; username: string; message: string; timestamp: string; avatar_url?: string }[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const chatScrollRef = useRef<HTMLDivElement>(null);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isHoveringRef = useRef(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -87,7 +83,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const mediaSourcesRef = useRef<{ [socketId: string]: MediaSource }>({});
   const sourceBuffersRef = useRef<{ [socketId: string]: SourceBuffer }>({});
-  const localMimeTypeRef = useRef<string | null>(null);
   const chunkQueueRef = useRef<{ [socketId: string]: Blob[] }>({});
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
@@ -102,18 +97,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       if (storedSettings) {
         try {
           const settings = JSON.parse(storedSettings);
-          if (settings.joinMuted !== undefined) {
-            setIsMuted(settings.joinMuted);
-            isMutedRef.current = settings.joinMuted;
-          }
-          if (settings.joinVideoOff !== undefined) {
-            const shouldBeOn = !settings.joinVideoOff;
-            setLocalVideoOn(shouldBeOn);
-            localVideoOnRef.current = shouldBeOn;
-          }
+          if (settings.joinMuted !== undefined) setIsMuted(settings.joinMuted);
+          // If joinVideoOff is true, localVideoOn should be false.
+          // If joinVideoOff is false, localVideoOn should be true.
+          if (settings.joinVideoOff !== undefined) setLocalVideoOn(!settings.joinVideoOff);
         } catch (e) {
           console.error("Failed to parse meeting settings", e);
         }
+      } else {
+        // Default behavior if no settings found (e.g. direct link join)
+        // Maybe default to Muted=true, Video=false for safety?
+        // Current defaults are Muted=true, Video=false.
       }
     }
   }, [roomId]);
@@ -124,254 +118,66 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, [chatMessages, showChatPanel]);
 
-  const setupMediaRecorder = (stream: MediaStream) => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop();
-    }
-    if (socketRef.current && stream) {
-      const options = { mimeType: 'video/webm; codecs=vp8,opus' };
-      try {
-        const mediaRecorder = new MediaRecorder(stream, options);
+  // ... (existing useEffects)
 
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data && event.data.size > 0 && socketRef.current) {
-            socketRef.current.emit('media-chunk', {
-              socketId: socketRef.current.id,
-              chunk: event.data
-            });
-          }
-        };
-        mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(300);
-      } catch (e) {
-        console.error('MediaRecorder setup failed:', e);
-      }
-    }
-  };
+  // This socket.on listener needs to be inside an useEffect or a function called from useEffect
+  // For now, I'll assume it's part of the socket initialization logic within useEffect.
+  // If it's meant to be a global listener, it should be handled differently.
+  // For the purpose of this edit, I'm leaving it as is, assuming it's a placeholder.
+  // socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
+  //   setChatMessages(prev => [...prev, data]);
+  // });
 
-  const mimeTypesRef = useRef<{ [socketId: string]: string }>({});
+  // ... (existing socket listeners)
 
-  const processChunkQueue = async (socketId: string) => {
-    const sourceBuffer = sourceBuffersRef.current[socketId];
-    const mediaSource = mediaSourcesRef.current[socketId];
 
-    if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open' && chunkQueueRef.current[socketId]?.length > 0) {
-      const nextChunk = chunkQueueRef.current[socketId].shift();
-      if (nextChunk) {
-        try {
-          sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
-        } catch (e) {
-          // Ignore InvalidStateError during cleanup
-        }
-      }
-    }
-  };
 
-  const setupSourceBufferListeners = (sourceBuffer: SourceBuffer, socketId: string, mediaSource: MediaSource) => {
-    sourceBuffer.addEventListener('updateend', () => {
-      processChunkQueue(socketId);
-    });
-  };
 
-  const setupMediaSource = (userId: string, socketId: string, mimeType: string) => {
-    if (mediaSourcesRef.current[socketId] || !remoteVideoRefs.current[userId]) {
-      return;
-    }
-    console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId}, mimeType: ${mimeType}`);
-    const mediaSource = new MediaSource();
-    mediaSourcesRef.current[socketId] = mediaSource;
-    const videoElement = remoteVideoRefs.current[userId];
 
-    if (videoElement) {
-      videoElement.src = URL.createObjectURL(mediaSource);
-      videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
-    }
-
-    mediaSource.addEventListener('sourceopen', () => {
-      console.log(`MediaSource opened for ${socketId}`);
-      try {
-        const mime = mimeType === 'default' || !mimeType ? 'video/webm; codecs="vp8, opus"' : mimeType;
-
-        if (!MediaSource.isTypeSupported(mime)) {
-          console.error(`${mime} is not supported by this browser.`);
-          if (MediaSource.isTypeSupported('video/webm')) {
-            console.log('Falling back to generic video/webm');
-            const sourceBuffer = mediaSource.addSourceBuffer('video/webm');
-            sourceBuffersRef.current[socketId] = sourceBuffer;
-            setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
-            processChunkQueue(socketId);
-            return;
-          }
-          return;
-        }
-        const sourceBuffer = mediaSource.addSourceBuffer(mime);
-        sourceBuffersRef.current[socketId] = sourceBuffer;
-        setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
-        processChunkQueue(socketId);
-      } catch (e) {
-        console.error('Error adding source buffer:', e);
-      }
-    });
-  };
-
-  const cleanupMediaSource = (socketId: string) => {
-    console.log(`Cleaning up MediaSource for ${socketId}`);
-    const mediaSource = mediaSourcesRef.current[socketId];
-    if (mediaSource && mediaSource.readyState === 'open') {
-      try {
-        mediaSource.endOfStream();
-      } catch (e) {
-        console.error(`Error ending stream for ${socketId}`, e);
-      }
-    }
-    const userId = socketIdToUserIdMap.current[socketId];
-    if (userId && remoteVideoRefs.current[userId]) {
-      const videoEl = remoteVideoRefs.current[userId];
-      if (videoEl) {
-        URL.revokeObjectURL(videoEl.src);
-        videoEl.src = '';
-        videoEl.removeAttribute('src');
-      }
-    }
-    delete mediaSourcesRef.current[socketId];
-    delete sourceBuffersRef.current[socketId];
-    delete chunkQueueRef.current[socketId];
-  };
-
-  const initializeMediaStream = useCallback(async (requestVideo: boolean = false, requestMuted: boolean = true, isInitial: boolean = false) => {
-    try {
-      console.log(`Client: Initializing media stream (Video: ${requestVideo}, Initial: ${isInitial})...`);
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const videoDevices = devices.filter(device => device.kind === 'videoinput');
-      setAvailableVideoDevices(videoDevices);
-      setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
-      setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
-
-      if (requestVideo && videoDevices.length === 0) {
-        console.warn('No camera found. Falling back to audio-only.');
-        requestVideo = false;
-      }
-
-      const videoConstraint: boolean | MediaTrackConstraints = requestVideo
-        ? (selectedVideoDeviceId ? { deviceId: { exact: selectedVideoDeviceId } } : true)
-        : false;
-
-      const audioConstraint: boolean | MediaTrackConstraints = selectedAudioInputDeviceId
-        ? { deviceId: { exact: selectedAudioInputDeviceId } }
-        : true;
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraint,
-        audio: audioConstraint
-      });
-
-      const AudioContextClass = window.AudioContext || (window as unknown as Window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const audioContext = new AudioContextClass();
-      const source = audioContext.createMediaStreamSource(stream);
-      const gainNode = audioContext.createGain();
-      const destination = audioContext.createMediaStreamDestination();
-
-      const targetMuted = isInitial ? requestMuted : isMuted;
-      gainNode.gain.value = targetMuted ? 0 : micVolume;
-
-      source.connect(gainNode);
-      gainNode.connect(destination);
-
-      audioContextRef.current = audioContext;
-      gainNodeRef.current = gainNode;
-      audioSourceRef.current = source;
-      audioDestinationRef.current = destination;
-
-      const processedAudioTrack = destination.stream.getAudioTracks()[0];
-      const tracks = [processedAudioTrack];
-      if (requestVideo) {
-        tracks.unshift(...stream.getVideoTracks());
-      }
-      const mixedStream = new MediaStream(tracks);
-
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
-      }
-
-      setLocalStream(stream);
-      localStreamRef.current = stream;
-      setLocalVideoOn(requestVideo);
-      console.log('Client: Media stream initialized.');
-
-      setupMediaRecorder(mixedStream);
-
-      if (requestVideo) {
-        socketRef.current?.emit('camera-state-changed', {
-          roomId,
-          userId: session?.user?.email,
-          hasVideo: true
-        });
-      }
-
-      socketRef.current?.emit('mic-state-changed', {
-        roomId,
-        userId: session?.user?.email,
-        isMuted: targetMuted
-      });
-
-    } catch (err) {
-      console.error('Error accessing media devices:', err);
-      if (err instanceof DOMException && err.name === 'NotReadableError') {
-        console.log('Camera locked. Retrying in 1 second...');
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        try {
-          await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: selectedAudioInputDeviceId ? { deviceId: { exact: selectedAudioInputDeviceId } } : true
-          });
-          alert('카메라가 일시적으로 잠겨있습니다. 1초 뒤 다시 시도하거나 브라우저를 완전히 껐다 켜주세요.');
-          return;
-        } catch (retryErr) {
-          console.error('Retry failed:', retryErr);
-        }
-      }
-
-      if (err instanceof DOMException) {
-        if (err.name === 'NotAllowedError') {
-          alert('카메라/마이크 권한이 거부되었습니다. 브라우저 주소창의 자물쇠 아이콘을 클릭하여 권한을 허용해주세요.');
-        } else if (err.name === 'NotReadableError') {
-          if (!isInitial) alert('카메라 하드웨어 오류: 장치가 응답하지 않습니다.');
-        } else if (err.name === 'NotFoundError') {
-          if (!isInitial) alert('카메라/마이크를 찾을 수 없습니다.');
-        } else {
-          if (!isInitial) alert(`미디어 장치 오류: ${err.message}`);
-        }
-      } else {
-        if (!isInitial) alert('미디어 장치에 접근할 수 없습니다.');
-      }
-    }
-  }, [roomId, session, selectedVideoDeviceId, selectedAudioInputDeviceId, isMuted, micVolume]);
+  useEffect(() => {
+    const savedSetting = localStorage.getItem('exitImmediately') === 'true';
+    setExitImmediately(savedSetting);
+  }, []);
 
   useEffect(() => {
     if (status === 'loading') return;
     if (!session?.user) {
+      console.log('Client: No user found, redirecting to login.');
       router.push('/login');
       return;
     }
 
-    if (isInitialized.current) return;
+    if (isInitialized.current) {
+      return;
+    }
     isInitialized.current = true;
 
     const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
+    console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
-      transports: ['websocket'], // Force WebSocket to avoid CORS preflight issues with ngrok
-      extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
-      auth: { token: (session.user as { id?: string }).id || session.user.email },
+      extraHeaders: {
+        'ngrok-skip-browser-warning': 'true'
+      },
+      auth: {
+        token: (session.user as { id?: string }).id || session.user.email // Use ID if available to match currentUserId
+      },
     });
     socketRef.current = socket;
 
+
+
     const initialize = async () => {
       console.log('Client: Initializing...');
+
       const currentUserId = (session.user as { id?: string }).id || session.user?.email || 'unknown';
+      console.log('Client: currentUser set to', currentUserId);
+
       const username = session.user?.name || session.user?.email || 'Anonymous';
+      // userProfile state removed, using session directly
 
       try {
+        console.log('Client: Enumerating media devices...');
         const devices = await navigator.mediaDevices.enumerateDevices();
         setAvailableVideoDevices(devices.filter(device => device.kind === 'videoinput'));
         setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
@@ -381,6 +187,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       }
 
       socket.connect();
+
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
         socket.emit('join-room', {
@@ -392,47 +199,63 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
 
         // Initialize media stream after joining (or in parallel)
+        // We need to read the settings again or pass them. 
+        // Since we are inside initialize, we can read from sessionStorage if needed, 
+        // but it's better to rely on the state that was set by the first useEffect.
+        // However, state updates might not be reflected yet if this runs immediately.
+        // Let's read from sessionStorage directly here for safety.
         let initialVideoOn = false;
         let initialMuted = true;
 
         if (typeof window !== 'undefined') {
           const storedSettings = sessionStorage.getItem(`meeting-settings-${roomId}`);
           if (storedSettings) {
-            try {
-              const settings = JSON.parse(storedSettings);
-              if (settings.joinVideoOff !== undefined) initialVideoOn = !settings.joinVideoOff;
-              if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
-            } catch (e) {
-              console.error("Failed to parse meeting settings", e);
-            }
+            const settings = JSON.parse(storedSettings);
+            if (settings.joinVideoOff !== undefined) initialVideoOn = !settings.joinVideoOff;
+            if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
           }
         }
 
         initializeMediaStream(initialVideoOn, initialMuted, true); // isInitial = true
+
       });
 
       socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string }) => {
+        console.log('Client: room-state received', data);
         const filteredParticipants = data.participants.filter(p => p.userId !== currentUserId);
-        if (data.title) setMeetingTitle(data.title);
-        if (data.hostId && data.hostId === currentUserId) setIsHost(true);
 
+        if (data.title) setMeetingTitle(data.title);
+        if (data.hostId && data.hostId === currentUserId) {
+          setIsHost(true);
+          console.log('Client: You are the host.');
+        }
+
+        // Populate maps immediately
         data.participants.forEach(p => {
           if (p.userId !== currentUserId) {
             socketIdToUserIdMap.current[p.socketId] = p.userId;
             userIdToSocketIdMap.current[p.userId] = p.socketId;
           }
         });
+
         setParticipants(filteredParticipants);
       });
 
       socket.on('user-joined', async (data: Participant & { socketId: string }) => {
+        console.log(`Client: New user ${data.username} joined with socketId ${data.socketId}.`);
         if (data.userId === currentUserId) return;
+
+        const newParticipant = { ...data };
+
+        // Populate maps immediately
         socketIdToUserIdMap.current[data.socketId] = data.userId;
         userIdToSocketIdMap.current[data.userId] = data.socketId;
-        setParticipants(prev => [...prev, data]);
+
+        setParticipants(prev => [...prev, newParticipant]);
       });
 
       socket.on('user-left', (data: { userId: string }) => {
+        console.log(`Client: User ${data.userId} left`);
         const socketId = userIdToSocketIdMap.current[data.userId];
         if (socketId) {
           cleanupMediaSource(socketId);
@@ -466,36 +289,380 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('chat-message', (data: { userId: string, username: string, message: string, timestamp: Date, avatar_url?: string }) => {
-        console.log('[ChatDebug] Received chat-message:', data);
-        setChatMessages(prev => [...prev, {
-          ...data,
-          timestamp: typeof data.timestamp === 'string' ? data.timestamp : new Date(data.timestamp).toISOString()
-        }]);
+      socket.on('mic-state-changed', (data: { userId: string; isMuted: boolean }) => {
+        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
+      });
+
+      socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
+        setChatMessages(prev => [...prev, data]);
+      });
+
+      socket.on('meeting-title-updated', (data: { title: string }) => {
+        setMeetingTitle(data.title);
+      });
+
+      socket.on('reaction-received', (data: { userId: string; emoji: string }) => {
+        const newReaction: Reaction = {
+          id: Math.random().toString(36).substr(2, 9),
+          emoji: data.emoji,
+          userId: data.userId
+        };
+        setReactions(prev => [...prev, newReaction]);
+
+        // Cleanup after animation (2s)
+        setTimeout(() => {
+          setReactions(prev => prev.filter(r => r.id !== newReaction.id));
+        }, 2000);
+      });
+
+      socket.on('chat-error', (data: { message: string }) => {
+        console.error('[ChatDebug] Chat error received:', data.message);
+        if (data.message.includes('Room not found') || data.message.includes('Participant not found')) {
+          console.log('[ChatDebug] Room/Participant missing on server. Attempting to re-join...');
+          socket.emit('join-room', {
+            roomId,
+            username,
+            avatar_url: session.user?.image,
+            hasVideo: localVideoOn,
+            isMuted: isMuted
+          });
+          // Optional: Retry sending the message after a short delay?
+          // For now, just let the user retry or rely on the next message.
+        } else {
+          alert(`채팅 전송 실패: ${data.message}`);
+        }
+      });
+
+      socket.on('disconnect', (reason) => {
+        console.log('Client: Disconnected from WebSocket server', reason);
+      });
+      socket.on('connect_error', (error) => {
+        console.error('Client: WebSocket connection error', error);
+      });
+
+      socket.on('error', (data: { message: string }) => {
+        console.error('Client: Socket error:', data.message);
+        alert(data.message);
+        router.push('/');
       });
     };
 
     initialize();
 
+    const mediaSources = mediaSourcesRef.current;
+
     return () => {
+      console.log('Client: useEffect cleanup');
       mediaRecorderRef.current?.stop();
       localStreamRef.current?.getTracks().forEach(track => track.stop());
-      if (audioContextRef.current) audioContextRef.current.close();
-      Object.keys(mediaSourcesRef.current).forEach(socketId => cleanupMediaSource(socketId));
-      socket.emit('leave-room');
+
+      // Cleanup Audio Context
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
+
+      Object.keys(mediaSources).forEach(socketId => {
+        cleanupMediaSource(socketId);
+      });
+
+      socket.emit('leave-room'); // Notify server immediately on unmount
       socket.disconnect();
       socketRef.current = null;
       socketIdToUserIdMap.current = {};
       setParticipants([]);
-      isInitialized.current = false;
+      isInitialized.current = false; // Allow re-initialization on remount
     };
   }, [roomId, router, session, status]);
 
+  // Handle browser tab close / refresh
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
+    const handleBeforeUnload = () => {
+      // Use Beacon or Fetch with keepalive for reliable exit
+      fetch(`/api/meeting/${roomId}/leave`, {
+        method: 'POST',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      socketRef.current?.disconnect();
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      // Also trigger on component unmount (client-side navigation)
+      handleBeforeUnload();
+    };
+  }, [roomId]);
+
+
+  useEffect(() => {
+    const setAudioOutput = async () => {
+      if (selectedAudioOutputDeviceId) {
+        Object.values(remoteVideoRefs.current).forEach(videoElement => {
+          if (videoElement && typeof videoElement.setSinkId === 'function') {
+            try {
+              videoElement.setSinkId(selectedAudioOutputDeviceId);
+            } catch (error) {
+              console.error('Error setting audio output:', error);
+            }
+          }
+        });
+      }
+    };
+    setAudioOutput();
+  }, [selectedAudioOutputDeviceId]);
+
+  useEffect(() => {
+    Object.values(remoteVideoRefs.current).forEach(videoElement => {
+      if (videoElement) {
+        videoElement.volume = volume;
+      }
+    });
+  }, [volume, participants]);
+
+  // Update Mic Gain when micVolume changes
+  useEffect(() => {
+    if (gainNodeRef.current) {
+      gainNodeRef.current.gain.value = micVolume;
+    }
+  }, [micVolume]);
+
+  useEffect(() => {
+    if (localStream && localVideoRef.current) {
       localVideoRef.current.srcObject = localStream;
     }
   }, [localStream]);
+
+  const setupMediaRecorder = (stream: MediaStream) => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+    }
+    if (socketRef.current && stream) {
+      const options = { mimeType: 'video/webm; codecs=vp8,opus' };
+      try {
+        const mediaRecorder = new MediaRecorder(stream, options);
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0 && socketRef.current) {
+            socketRef.current.emit('media-chunk', event.data);
+          }
+        };
+        mediaRecorderRef.current = mediaRecorder;
+        mediaRecorder.start(300);
+      } catch (e) {
+        console.error('MediaRecorder setup failed:', e);
+      }
+    }
+  };
+
+  const setupMediaSource = (userId: string, socketId: string) => {
+    if (mediaSourcesRef.current[socketId] || !remoteVideoRefs.current[userId]) {
+      return;
+    }
+    console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId}`);
+    const mediaSource = new MediaSource();
+    mediaSourcesRef.current[socketId] = mediaSource;
+    const videoElement = remoteVideoRefs.current[userId];
+
+    if (videoElement) {
+      videoElement.src = URL.createObjectURL(mediaSource);
+      videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
+    }
+
+    mediaSource.addEventListener('sourceopen', () => {
+      console.log(`MediaSource opened for ${socketId}`);
+      try {
+        const mime = 'video/webm; codecs="vp8, opus"';
+        if (!MediaSource.isTypeSupported(mime)) {
+          console.error(`${mime} is not supported`);
+          return;
+        }
+        const sourceBuffer = mediaSource.addSourceBuffer(mime);
+        sourceBuffersRef.current[socketId] = sourceBuffer;
+
+        sourceBuffer.addEventListener('updateend', async () => {
+          if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+            const nextChunk = chunkQueueRef.current[socketId].shift();
+            if (nextChunk) {
+              try {
+                sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+              } catch (e) {
+                if (e instanceof DOMException && e.name === 'InvalidStateError') {
+                  console.warn(`Ignored InvalidStateError in queue for ${socketId}`);
+                } else {
+                  console.error(`Error appending queued buffer for ${socketId}`, e);
+                }
+              }
+            }
+          }
+        });
+      } catch (e) {
+        console.error('Error adding source buffer:', e);
+      }
+    });
+  };
+
+  const cleanupMediaSource = (socketId: string) => {
+    console.log(`Cleaning up MediaSource for ${socketId}`);
+    const mediaSource = mediaSourcesRef.current[socketId];
+    if (mediaSource && mediaSource.readyState === 'open') {
+      try {
+        mediaSource.endOfStream();
+      } catch (e) {
+        console.error(`Error ending stream for ${socketId}`, e);
+      }
+    }
+    const userId = socketIdToUserIdMap.current[socketId];
+    if (userId && remoteVideoRefs.current[userId]) {
+      const videoEl = remoteVideoRefs.current[userId];
+      if (videoEl) {
+        URL.revokeObjectURL(videoEl.src);
+        videoEl.src = '';
+        videoEl.removeAttribute('src');
+      }
+    }
+    delete mediaSourcesRef.current[socketId];
+    delete sourceBuffersRef.current[socketId];
+    delete chunkQueueRef.current[socketId];
+  };
+
+
+
+  // Effect to set up MediaSource for participants when they are added and video elements are ready
+  useEffect(() => {
+    participants.forEach(p => {
+      const socketId = userIdToSocketIdMap.current[p.userId];
+      if (socketId && !mediaSourcesRef.current[socketId] && remoteVideoRefs.current[p.userId]) {
+        setupMediaSource(p.userId, socketId);
+      }
+    });
+  }, [participants]);
+
+  const initializeMediaStream = useCallback(async (requestVideo: boolean = false, requestMuted: boolean = true, isInitial: boolean = false) => {
+    try {
+      console.log(`Client: Initializing media stream (Video: ${requestVideo}, Initial: ${isInitial})...`);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      setAvailableVideoDevices(videoDevices);
+      setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
+      setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
+
+      // Check if camera exists
+      if (requestVideo && videoDevices.length === 0) {
+        console.warn('No camera found. Falling back to audio-only.');
+        // Alert removed as per user request
+        requestVideo = false;
+      }
+
+      const videoConstraint: boolean | MediaTrackConstraints = requestVideo
+        ? (selectedVideoDeviceId ? { deviceId: { exact: selectedVideoDeviceId } } : true)
+        : false;
+
+      const audioConstraint: boolean | MediaTrackConstraints = selectedAudioInputDeviceId
+        ? { deviceId: { exact: selectedAudioInputDeviceId } }
+        : true;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: videoConstraint,
+        audio: audioConstraint
+      });
+
+      // --- Audio Processing for Volume Control ---
+      const AudioContextClass = window.AudioContext || (window as unknown as Window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const audioContext = new AudioContextClass();
+      const source = audioContext.createMediaStreamSource(stream);
+      const gainNode = audioContext.createGain();
+      const destination = audioContext.createMediaStreamDestination();
+
+      // Initialize gain based on current mute state (or the intent to unmute if called from toggleMute)
+      // Note: If called from toggleMute, we set isMuted=false BEFORE calling this, so this should be correct.
+      // If called from toggleCamera (and no stream), isMuted is likely true (default), so we start muted.
+      // Use requestMuted if provided, otherwise fallback to state
+      const targetMuted = isInitial ? requestMuted : isMuted;
+      gainNode.gain.value = targetMuted ? 0 : micVolume;
+
+      source.connect(gainNode);
+      gainNode.connect(destination);
+
+      audioContextRef.current = audioContext;
+      gainNodeRef.current = gainNode;
+      audioSourceRef.current = source;
+      audioDestinationRef.current = destination;
+
+      // Create a mixed stream for MediaRecorder
+      const processedAudioTrack = destination.stream.getAudioTracks()[0];
+      const tracks = [processedAudioTrack];
+      if (requestVideo) {
+        tracks.unshift(...stream.getVideoTracks());
+      }
+      const mixedStream = new MediaStream(tracks);
+      // -------------------------------------------
+
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+
+      setLocalStream(stream);
+      localStreamRef.current = stream;
+      setLocalVideoOn(requestVideo);
+      console.log('Client: Media stream initialized.');
+
+      setupMediaRecorder(mixedStream);
+
+      if (requestVideo) {
+        socketRef.current?.emit('camera-state-changed', {
+          roomId,
+          userId: session?.user?.email,
+          hasVideo: true
+        });
+      }
+
+      // Emit initial mic state (which should be unmuted if we just initialized)
+      socketRef.current?.emit('mic-state-changed', {
+        roomId,
+        userId: session?.user?.email,
+        isMuted: targetMuted // This might be stale if called from toggleMute, but toggleMute emits its own event
+      });
+
+    } catch (err) {
+      console.error('Error accessing media devices:', err);
+
+      // Retry logic for NotReadableError (often caused by rapid reloads or zombie locks)
+      if (err instanceof DOMException && err.name === 'NotReadableError') {
+        console.log('Camera locked. Retrying in 1 second...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        try {
+          // Retry without specific deviceId to be safe
+          await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: selectedAudioInputDeviceId ? { deviceId: { exact: selectedAudioInputDeviceId } } : true
+          });
+          // ... (Duplicate success logic or extract to function - for now, let's just recurse or handle simply)
+          // To avoid code duplication, it's better to just alert for now, or use a recursive approach with a retry counter.
+          // Let's alert with a specific "Retry" suggestion.
+          alert('카메라가 일시적으로 잠겨있습니다. 1초 뒤 다시 시도하거나 브라우저를 완전히 껐다 켜주세요.');
+          return;
+        } catch (retryErr) {
+          console.error('Retry failed:', retryErr);
+        }
+      }
+
+      if (err instanceof DOMException) {
+        if (err.name === 'NotAllowedError') {
+          alert('카메라/마이크 권한이 거부되었습니다. 브라우저 주소창의 자물쇠 아이콘을 클릭하여 권한을 허용해주세요.');
+        } else if (err.name === 'NotReadableError') {
+          if (!isInitial) alert('카메라 하드웨어 오류: 장치가 응답하지 않습니다. (잠시 후 다시 시도하거나 컴퓨터를 재부팅해주세요)');
+        } else if (err.name === 'NotFoundError') {
+          if (!isInitial) alert('카메라/마이크를 찾을 수 없습니다. 장치가 올바르게 연결되었는지 확인해주세요.');
+        } else {
+          if (!isInitial) alert(`미디어 장치 오류: ${err.message}`);
+        }
+      } else {
+        if (!isInitial) alert('미디어 장치에 접근할 수 없습니다. 알 수 없는 오류가 발생했습니다.');
+      }
+    }
+  }, [roomId, session, selectedVideoDeviceId, selectedAudioInputDeviceId, isMuted, micVolume]);
 
   const toggleCamera = async () => {
     if (!localStreamRef.current) {
@@ -503,19 +670,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       return;
     }
 
-    const currentUserId = (session?.user as { id?: string })?.id || session?.user?.email;
     const videoTrack = localStreamRef.current.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.enabled = !videoTrack.enabled;
       setLocalVideoOn(videoTrack.enabled);
-      localVideoOnRef.current = videoTrack.enabled;
 
       socketRef.current?.emit('camera-state-changed', {
         roomId,
-        userId: currentUserId,
+        userId: session?.user?.email,
         hasVideo: videoTrack.enabled,
       });
     } else {
+      // Stream exists but no video track (Audio only mode -> Video mode)
       try {
         const videoConstraint: boolean | MediaTrackConstraints = selectedVideoDeviceId
           ? { deviceId: { exact: selectedVideoDeviceId } }
@@ -527,8 +693,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         const newVideoTrack = videoStream.getVideoTracks()[0];
         localStreamRef.current.addTrack(newVideoTrack);
         setLocalVideoOn(true);
-        localVideoOnRef.current = true;
 
+        // We need to reconstruct the mixed stream for MediaRecorder
         if (audioDestinationRef.current) {
           const processedAudioTrack = audioDestinationRef.current.stream.getAudioTracks()[0];
           const mixedStream = new MediaStream([
@@ -540,7 +706,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         socketRef.current?.emit('camera-state-changed', {
           roomId,
-          userId: currentUserId,
+          userId: session?.user?.email,
           hasVideo: true,
         });
       } catch (e) {
@@ -554,34 +720,35 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const toggleMute = async () => {
     let newMutedState = !isMuted;
-    const currentUserId = (session?.user as { id?: string })?.id || session?.user?.email;
 
     if (!localStreamRef.current) {
-      setIsMuted(false);
-      isMutedRef.current = false;
+      // Initialize audio only
+      setIsMuted(false); // Optimistically set mute to false since user clicked unmute
       newMutedState = false;
       await initializeMediaStream(false, false, false);
     } else {
       if (localStreamRef.current) {
+        // If using AudioContext, mute the gain node
         if (gainNodeRef.current) {
+          // Toggle mute state
           setIsMuted(newMutedState);
-          isMutedRef.current = newMutedState;
           gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
         } else {
+          // Fallback
           const audioTrack = localStreamRef.current.getAudioTracks()[0];
           if (audioTrack) {
             audioTrack.enabled = !audioTrack.enabled;
             setIsMuted(!audioTrack.enabled);
-            isMutedRef.current = !audioTrack.enabled;
             newMutedState = !audioTrack.enabled;
           }
         }
       }
     }
 
+    // Emit state change
     socketRef.current?.emit('mic-state-changed', {
       roomId,
-      userId: currentUserId,
+      userId: session?.user?.email,
       isMuted: newMutedState
     });
   };
@@ -594,6 +761,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }, 2000);
   };
 
+
+
   const leaveRoom = () => {
     console.log('Client: Leaving room');
     mediaRecorderRef.current?.stop();
@@ -603,12 +772,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       audioContextRef.current.close();
     }
 
+    // Explicitly notify server before disconnecting and wait for Ack
     if (socketRef.current?.connected) {
       const timeout = setTimeout(() => {
         console.log('Client: Leave Ack timed out, forcing disconnect');
         socketRef.current?.disconnect();
         router.push('/');
-      }, 500);
+      }, 500); // Wait max 500ms
 
       socketRef.current.emit('leave-room', {}, () => {
         console.log('Client: Leave Ack received');
@@ -617,6 +787,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         router.push('/');
       });
     } else {
+      // If already disconnected, just go home
       router.push('/');
     }
   };
@@ -635,11 +806,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     localStorage.setItem('exitImmediately', String(newValue));
   };
 
+  // --- Chat Logic ---
   useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [chatMessages, showChatPanel]);
+
+
 
   const sendMessage = (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -669,29 +843,24 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     setNewMessage('');
   };
 
-  const handleTitleChange = (newTitle: string) => {
-    socketRef.current?.emit('update-meeting-title', { roomId, title: newTitle });
+  const handleTitleUpdate = () => {
+    if (!tempTitle.trim() || tempTitle === meetingTitle) {
+      setIsEditingTitle(false);
+      return;
+    }
+    socketRef.current?.emit('update-meeting-title', { roomId, title: tempTitle });
+    setIsEditingTitle(false);
   };
 
   const handleSendReaction = (emoji: string) => {
     socketRef.current?.emit('send-reaction', { roomId, emoji });
+    // Optimistically show reaction for self? 
+    // The server broadcasts to everyone including sender, so we can wait for that.
+    // Or we can show it immediately for better responsiveness.
+    // Let's rely on server broadcast for consistency for now.
   };
 
-  const resetControlsTimer = useCallback(() => {
-    if (controlsTimeoutRef.current) {
-      clearTimeout(controlsTimeoutRef.current);
-    }
-    controlsTimeoutRef.current = setTimeout(() => {
-      setShowControls(false);
-    }, 3000);
-  }, []);
-
-  useEffect(() => {
-    resetControlsTimer();
-    return () => {
-      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-    };
-  }, [resetControlsTimer]);
+  // --- UI Components ---
 
   const ParticipantCard = ({
     participant,
@@ -710,12 +879,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <div className="w-full h-full flex items-center justify-center bg-black/90">
           {isLocal ? (
             <video
-              ref={el => {
-                localVideoRef.current = el;
-                if (el && localStream) {
-                  el.srcObject = localStream;
-                }
-              }}
+              ref={localVideoRef}
               autoPlay
               muted
               playsInline
@@ -748,6 +912,19 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs md:text-sm text-white font-medium backdrop-blur-sm flex items-center gap-2">
           <span>
             {participant.username} {isLocal && "(You)"}
+            {/* Host Badge - We need to know if this participant is the host. 
+                We don't have isHost prop on participant object directly here unless we pass it or check ID.
+                Let's assume we can check against a hostId state if available, or if the participant object has a role.
+                For now, we'll check if participant.userId matches the known hostId (which we need to store in state).
+            */}
+            {/* Since we don't have hostId in this scope easily without prop drilling or context, 
+                let's assume the parent passes a way to know, or we rely on the fact that we set isHost state for local user.
+                But for remote users? We need to know who the host is. 
+                Let's add `hostId` to the component state and pass it down or check it here.
+                Actually, `meeting-client` has `isHost` state, but that's only for the local user.
+                We need to know the hostId to label others.
+                Let's update the component to accept `isHostUser` prop.
+            */}
             {/* Temporary fix: We will update the ParticipantCard usage to pass isHostUser */}
           </span>
           {/* Mute Status Icon */}
@@ -781,11 +958,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             </>
           )}
         </div>
-      </div >
+      </div>
     );
   };
-
-
 
   // --- Render Logic ---
 
@@ -794,77 +969,79 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
 
   return (
-    <div className="fixed inset-0 bg-background text-foreground overflow-hidden" >
+    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative" >
 
-      <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row h-full">
+      {/* Top Bar (View Switcher) */}
+      < div className={
+        cn(
+          "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
+          showControls ? "translate-y-0" : "-translate-y-full"
+        )
+      } >
+        <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
+          {isEditingTitle ? (
+            <Input
+              autoFocus
+              value={tempTitle}
+              onChange={(e) => setTempTitle(e.target.value)}
+              onBlur={handleTitleUpdate}
+              onKeyDown={(e) => e.key === 'Enter' && handleTitleUpdate()}
+              className="h-6 w-48 bg-transparent border-none text-white focus-visible:ring-0 p-0"
+            />
+          ) : (
+            <span
+              onClick={() => {
+                if (isHost) {
+                  setTempTitle(meetingTitle);
+                  setIsEditingTitle(true);
+                }
+              }}
+              className={cn(isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
+              title={isHost ? "Click to edit title" : undefined}
+            >
+              {meetingTitle}
+            </span>
+          )}
+          {isHost && !isEditingTitle && (
+            <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
+              setTempTitle(meetingTitle);
+              setIsEditingTitle(true);
+            }} />
+          )}
+          <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
+        </div>
+        <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
+          <Button
+            variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="text-white hover:bg-white/20"
+            onClick={() => setLayoutMode('speaker')}
+          >
+            <Maximize className="w-4 h-4 mr-2" /> Speaker
+          </Button>
+          <Button
+            variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="text-white hover:bg-white/20"
+            onClick={() => setLayoutMode('grid')}
+          >
+            <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
+          </Button>
+        </div>
+      </div >
+
+      <div className="flex flex-1 overflow-hidden relative">
         <ReactionOverlay reactions={reactions} />
         {/* Main Content Area */}
-        <main
-          className="flex-1 bg-neutral-900 relative p-4 pb-20 md:pb-4 flex items-center justify-center transition-all duration-300 overflow-hidden group min-h-0"
-          onMouseMove={() => {
-            // Only reset timer if controls are ALREADY visible.
-            // Moving mouse should NOT show controls if they are hidden.
-            if (showControls) {
-              resetControlsTimer();
-            }
-          }}
-          onClick={() => {
-            // Unified toggle logic:
-            // If visible -> Hide
-            // If hidden -> Show (and start timer)
-            if (showControls) {
-              setShowControls(false);
-              if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
-            } else {
-              setShowControls(true);
-              resetControlsTimer();
-            }
-          }}
-        >
-
-          {/* Top Bar (View Switcher) - Moved inside Main */}
-          <div className={
-            cn(
-              "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
-              showControls ? "translate-y-0" : "-translate-y-full"
-            )
-          }
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
-              <span className="font-semibold px-2">{meetingTitle}</span>
-              {isHost && (
-                <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-white" onClick={() => setShowSettingsModal(true)}>
-                  <Settings className="w-3 h-3" />
-                </Button>
-              )}
-              <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
-            </div>
-            <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
-              <Button
-                variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
-                size="sm"
-                className="text-white hover:bg-white/20"
-                onClick={() => setLayoutMode('speaker')}
-              >
-                <Maximize className="w-4 h-4 mr-2" /> Speaker
-              </Button>
-              <Button
-                variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
-                size="sm"
-                className="text-white hover:bg-white/20"
-                onClick={() => setLayoutMode('grid')}
-              >
-                <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
-              </Button>
-            </div>
-          </div>
-
+        <main className={cn(
+          "flex-1 bg-neutral-900 relative p-4 flex items-center justify-center transition-all duration-300",
+          showChatPanel ? "mr-0" : "mr-0"
+        )}>
           {layoutMode === 'speaker' ? (
             // Speaker View
-            <div className="w-full h-full flex flex-col md:flex-row gap-4 pt-14 min-h-0">
+            <div className="w-full h-full flex flex-col md:flex-row gap-4">
               {/* Main Stage */}
-              <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl min-h-0">
+              <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl">
                 {mainSpeaker ? (
                   <ParticipantCard
                     participant={mainSpeaker}
@@ -881,7 +1058,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               </div>
               {/* Filmstrip */}
               {(participants.length > 0) && (
-                <div className="h-32 md:h-full md:w-48 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide min-h-0">
+                <div className="h-32 md:h-full md:w-48 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide">
                   {mainSpeaker && (
                     <ParticipantCard
                       participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
@@ -903,109 +1080,110 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           ) : (
             // Grid View
             <div className={cn(
-              "w-full h-full grid gap-2 p-2 md:gap-4 md:p-4 pt-14 min-h-0",
-              (participants.length + 1) <= 1 ? "grid-cols-1 grid-rows-1" :
-                (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2 grid-rows-2 md:grid-rows-1" :
-                  (participants.length + 1) <= 4 ? "grid-cols-2 grid-rows-2" :
-                    (participants.length + 1) <= 6 ? "grid-cols-2 md:grid-cols-3 grid-rows-3 md:grid-rows-2" :
-                      (participants.length + 1) <= 9 ? "grid-cols-2 md:grid-cols-3 grid-rows-5 md:grid-rows-3" :
-                        "grid-cols-2 md:grid-cols-3 lg:grid-cols-4 auto-rows-fr"
+              "w-full h-full grid gap-4 p-4 overflow-y-auto auto-rows-fr",
+              (participants.length + 1) <= 1 ? "grid-cols-1" :
+                (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2" :
+                  (participants.length + 1) <= 4 ? "grid-cols-2" :
+                    (participants.length + 1) <= 9 ? "grid-cols-2 md:grid-cols-3" :
+                      "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
             )}>
               <ParticipantCard
                 participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
                 isLocal={true}
-                className="min-h-0"
               />
               {participants.map(p => (
                 <ParticipantCard
                   key={p.userId}
                   participant={p}
                   isPinned={p.userId === pinnedUserId}
-                  className="min-h-0"
                 />
               ))}
             </div>
           )}
-          {/* Reaction Bar */}
-          <div className={cn(
-            "absolute bottom-24 left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-300",
-            showControls ? "opacity-100" : "opacity-0 pointer-events-none"
-          )}>
-            <ReactionBar onReaction={handleSendReaction} />
-          </div>
-
-          {/* Control Bar - Solid on Mobile, Floating Pill on Desktop */}
-          <div className={cn(
-            "fixed z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-2 md:space-x-4 shadow-2xl",
-            // Mobile Styles: Bottom fixed, full width, black background
-            "bottom-0 left-0 right-0 h-16 bg-black border-t border-white/10 rounded-none px-4",
-            // Desktop Styles: Floating pill, centered, rounded
-            "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:h-auto md:bg-black/80 md:backdrop-blur-xl md:border md:rounded-full md:px-6 md:py-3 md:w-auto",
-            showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
-          )}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <Button
-              variant={isMuted ? "destructive" : "secondary"}
-              size="icon"
-              className="rounded-full w-10 h-10 md:w-12 md:h-12"
-              onClick={toggleMute}
-            >
-              {isMuted ? <MicOff className="w-4 h-4 md:w-5 md:h-5" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
-            </Button>
-
-            <Button
-              variant={localVideoOn ? "secondary" : "destructive"}
-              size="icon"
-              className="rounded-full w-10 h-10 md:w-12 md:h-12"
-              onClick={toggleCamera}
-            >
-              {localVideoOn ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
-            </Button>
-
-            <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowMorePanel(true)}>
-              <Settings className="w-4 h-4 md:w-5 md:h-5" />
-            </Button>
-
-            <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowParticipantsPanel(true)}>
-              <Users className="w-4 h-4 md:w-5 md:h-5" />
-            </Button>
-
-            <Button
-              variant={showChatPanel ? "default" : "secondary"}
-              size="icon"
-              className="rounded-full w-10 h-10 md:w-12 md:h-12"
-              onClick={() => setShowChatPanel(!showChatPanel)}
-            >
-              <MessageSquare className="w-4 h-4 md:w-5 md:h-5" />
-            </Button>
-
-            <div className="w-px h-6 md:h-8 bg-white/20 mx-1 md:mx-2" />
-
-            <Button
-              variant="destructive"
-              className="rounded-full px-4 md:px-6 h-10 md:h-12 font-semibold bg-red-600 hover:bg-red-700 text-sm md:text-base"
-              onClick={handleEndCallClick}
-            >
-              End
-            </Button>
-          </div>
         </main>
 
-        {/* Chat Panel (Right Sidebar on Desktop, Full Overlay on Mobile) */}
+        {/* Chat Panel (Right Sidebar) */}
         {showChatPanel && (
-          <div className="fixed inset-0 z-50 md:static md:z-auto md:w-96 md:border-l bg-background h-full flex-shrink-0 transition-all duration-300">
-            <ChatPanel
-              messages={chatMessages}
-              currentUserId={(session?.user as { id?: string }).id || session?.user?.email}
-              newMessage={newMessage}
-              onNewMessageChange={setNewMessage}
-              onSendMessage={sendMessage}
-              onClose={() => setShowChatPanel(false)}
-            />
-          </div>
+          <ChatPanel
+            messages={chatMessages}
+            currentUserId={(session?.user as { id?: string })?.id || session?.user?.email}
+            newMessage={newMessage}
+            onNewMessageChange={setNewMessage}
+            onSendMessage={sendMessage}
+            onClose={() => setShowChatPanel(false)}
+          />
         )}
       </div>
+
+      {/* Control Bar Toggle Button */}
+      <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 flex flex-col items-center gap-4"
+        style={{ bottom: showControls ? '80px' : '20px' }}>
+
+        {showControls && (
+          <ReactionBar onReaction={handleSendReaction} />
+        )}
+
+        <Button
+          variant="secondary"
+          size="sm"
+          className="rounded-full shadow-lg bg-background/80 backdrop-blur-sm border hover:bg-background"
+          onClick={() => setShowControls(!showControls)}
+        >
+          {showControls ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+        </Button>
+      </div>
+
+      {/* Control Bar */}
+      <div className={cn(
+        "fixed bottom-0 left-0 right-0 h-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t z-40 transition-transform duration-300 ease-in-out flex items-center justify-center space-x-4",
+        showControls ? "translate-y-0" : "translate-y-full"
+      )}>
+        <Button
+          variant={isMuted ? "destructive" : "secondary"}
+          size="icon"
+          className="rounded-full w-12 h-12"
+          onClick={toggleMute}
+        >
+          {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+        </Button>
+
+        <Button
+          variant={localVideoOn ? "secondary" : "destructive"}
+          size="icon"
+          className="rounded-full w-12 h-12"
+          onClick={toggleCamera}
+        >
+          {localVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+        </Button>
+
+        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowMorePanel(true)}>
+          <Settings className="w-5 h-5" />
+        </Button>
+
+        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowParticipantsPanel(true)}>
+          <Users className="w-5 h-5" />
+        </Button>
+
+        <Button
+          variant={showChatPanel ? "default" : "secondary"}
+          size="icon"
+          className="rounded-full w-12 h-12"
+          onClick={() => setShowChatPanel(!showChatPanel)}
+        >
+          <MessageSquare className="w-5 h-5" />
+        </Button>
+
+        <div className="w-px h-8 bg-border mx-2" />
+
+        <Button
+          variant="destructive"
+          className="rounded-full px-6 h-12 font-semibold bg-red-600 hover:bg-red-700"
+          onClick={handleEndCallClick}
+        >
+          End Call
+        </Button>
+      </div>
+
 
       {/* Participants Panel (Modal) */}
       {
@@ -1161,13 +1339,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           </div>
         )
       }
-      <SettingsModal
-        isOpen={showSettingsModal}
-        onClose={() => setShowSettingsModal(false)}
-        currentTitle={meetingTitle}
-        onTitleChange={handleTitleChange}
-        isHost={isHost}
-      />
-    </div>
+    </div >
   );
 }
