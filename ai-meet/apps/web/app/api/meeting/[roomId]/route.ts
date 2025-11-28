@@ -5,15 +5,16 @@ import { prisma } from '@/lib/prisma';
 
 export async function DELETE(
     req: Request,
-    { params }: { params: { roomId: string } }
+    { params }: { params: Promise<{ roomId: string }> }
 ) {
+    const { roomId } = await params;
     try {
         const session = await getServerSession(authOptions);
         if (!session || !session.user?.email) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const roomId = params.roomId;
+
 
         // Verify ownership
         // We need to fetch the user first to compare IDs or use email if creator relation is loaded
