@@ -192,7 +192,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     if (videoElement) {
       videoElement.src = URL.createObjectURL(mediaSource);
-      videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
+      // Ensure audio is played by unmuting remote video elements (except for local feedback if needed)
+      videoElement.muted = false;
+      videoElement.onloadedmetadata = () => {
+        videoElement.play().catch(e => console.error("Autoplay failed", e));
+      };
     }
 
     mediaSource.addEventListener('sourceopen', () => {
@@ -202,16 +206,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         if (!MediaSource.isTypeSupported(mime)) {
           console.error(`${mime} is not supported by this browser.`);
-          if (MediaSource.isTypeSupported('video/webm')) {
-            console.log('Falling back to generic video/webm');
-            const sourceBuffer = mediaSource.addSourceBuffer('video/webm');
-            sourceBuffersRef.current[socketId] = sourceBuffer;
-            setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
-            processChunkQueue(socketId);
-            return;
-          }
+          // Fallback logic could go here, but usually vp8,opus is supported
           return;
         }
+
         const sourceBuffer = mediaSource.addSourceBuffer(mime);
         sourceBuffersRef.current[socketId] = sourceBuffer;
         setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
