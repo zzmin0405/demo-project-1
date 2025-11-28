@@ -29,6 +29,9 @@ interface Participant {
     credentials: true,
     methods: ['GET', 'POST'],
   },
+  pingTimeout: 60000, // Increase timeout to 60s for mobile stability
+  pingInterval: 25000, // Send ping every 25s
+  transports: ['websocket', 'polling'], // Explicitly allow polling fallback
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(private prisma: PrismaService) { }

@@ -26,15 +26,15 @@ interface Participant {
   avatar_url?: string;
 }
 
-type LayoutMode = 'speaker' | 'grid';
-
 export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
   const { data: session, status } = useSession();
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoOn, setLocalVideoOn] = useState(false);
+  const localVideoOnRef = useRef(false);
   const [isMuted, setIsMuted] = useState(true);
+  const isMutedRef = useRef(true);
   const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState<string | null>(null);
   const [availableVideoDevices, setAvailableVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [availableAudioInputDevices, setAvailableAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
@@ -99,10 +99,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       if (storedSettings) {
         try {
           const settings = JSON.parse(storedSettings);
-          if (settings.joinMuted !== undefined) setIsMuted(settings.joinMuted);
+          if (settings.joinMuted !== undefined) {
+            setIsMuted(settings.joinMuted);
+            isMutedRef.current = settings.joinMuted;
+          }
           // If joinVideoOff is true, localVideoOn should be false.
           // If joinVideoOff is false, localVideoOn should be true.
-          if (settings.joinVideoOff !== undefined) setLocalVideoOn(!settings.joinVideoOff);
+          if (settings.joinVideoOff !== undefined) {
+            const shouldBeOn = !settings.joinVideoOff;
+            setLocalVideoOn(shouldBeOn);
+            localVideoOnRef.current = shouldBeOn;
+          }
         } catch (e) {
           console.error("Failed to parse meeting settings", e);
         }
@@ -158,6 +165,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
+      transports: ['websocket', 'polling'], // Allow fallback
+      reconnection: true,
+      reconnectionAttempts: Infinity, // Keep trying to reconnect
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000, // Connection timeout
       extraHeaders: {
         'ngrok-skip-browser-warning': 'true'
       },
@@ -192,6 +205,32 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
+
+        // Check if we are reconnecting (stream already exists)
+        if (localStreamRef.current) {
+          console.log('Client: Reconnected. Re-joining room with existing stream.');
+          socket.emit('join-room', {
+            roomId,
+            username,
+            avatar_url: session.user?.image,
+            hasVideo: localVideoOnRef.current,
+            isMuted: isMutedRef.current
+          });
+
+          // Re-sync state
+          socket.emit('camera-state-changed', {
+            roomId,
+            userId: currentUserId,
+            hasVideo: localVideoOnRef.current
+          });
+          socket.emit('mic-state-changed', {
+            roomId,
+            userId: currentUserId,
+            isMuted: isMutedRef.current
+          });
+          return;
+        }
+
         socket.emit('join-room', {
           roomId,
           username,
@@ -441,6 +480,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       mediaRecorderRef.current.stop();
     }
     if (socketRef.current && stream) {
+      // Validate tracks
+      const videoTracks = stream.getVideoTracks();
+      const audioTracks = stream.getAudioTracks();
+
+      if (videoTracks.length === 0 && audioTracks.length === 0) {
+        console.warn("setupMediaRecorder: No tracks in stream, aborting.");
+        return;
+      }
+
+      console.log(`setupMediaRecorder: Starting with ${videoTracks.length} video tracks and ${audioTracks.length} audio tracks.`);
+
       const options = { mimeType: 'video/webm; codecs=vp8,opus' };
       try {
         const mediaRecorder = new MediaRecorder(stream, options);
@@ -675,7 +725,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const videoTrack = localStreamRef.current.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.enabled = !videoTrack.enabled;
+      videoTrack.enabled = !videoTrack.enabled;
       setLocalVideoOn(videoTrack.enabled);
+      localVideoOnRef.current = videoTrack.enabled;
 
       socketRef.current?.emit('camera-state-changed', {
         roomId,
@@ -695,6 +747,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         const newVideoTrack = videoStream.getVideoTracks()[0];
         localStreamRef.current.addTrack(newVideoTrack);
         setLocalVideoOn(true);
+        localVideoOnRef.current = true;
 
         // We need to reconstruct the mixed stream for MediaRecorder
         if (audioDestinationRef.current) {
@@ -726,6 +779,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     if (!localStreamRef.current) {
       // Initialize audio only
       setIsMuted(false); // Optimistically set mute to false since user clicked unmute
+      isMutedRef.current = false;
       newMutedState = false;
       await initializeMediaStream(false, false, false);
     } else {
@@ -734,6 +788,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         if (gainNodeRef.current) {
           // Toggle mute state
           setIsMuted(newMutedState);
+          isMutedRef.current = newMutedState;
           gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
         } else {
           // Fallback
@@ -741,6 +796,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           if (audioTrack) {
             audioTrack.enabled = !audioTrack.enabled;
             setIsMuted(!audioTrack.enabled);
+            isMutedRef.current = !audioTrack.enabled;
             newMutedState = !audioTrack.enabled;
           }
         }
