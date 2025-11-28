@@ -471,45 +471,203 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     // Broadcast reaction to all users in the room
     this.server.to(data.roomId).emit('reaction-received', {
-      userId: userId,
-      emoji: data.emoji
-    });
-  }
+    }
 
-  // --- Public Methods for Controller ---
-
-  public async forceDeleteRoom(roomId: string): Promise<void> {
-    // 1. Notify all users in the room that the meeting has ended
-    this.server.to(roomId).emit('meeting-ended', { reason: 'Host deleted the meeting' });
-
-    // 2. Disconnect all sockets in the room
-    const sockets = await this.server.in(roomId).fetchSockets();
-    sockets.forEach(socket => {
-      socket.leave(roomId);
-      socket.disconnect(true);
+    client.emit('room-state', {
+      roomId,
+      participants: otherUsers,
+      title: roomInfo?.title || 'Untitled Meeting',
+      hostId: roomInfo?.creatorId
     });
 
-    // 3. Cleanup local state
-    this.roomToUsers.delete(roomId);
-    console.log(`Force deleted room ${roomId} and kicked all participants.`);
+    // 2. Notify everyone else that a new user has joined (with their socketId).
+    client.to(roomId).emit('user-joined', { userId, username, hasVideo, isMuted, avatar_url, socketId: client.id });
+
+    console.log(`Client ${userId} (${username}) joined room ${roomId}.`);
   }
 
-  public async leaveRoomByUserId(roomId: string, userId: string): Promise<void> {
-    // Find socket for user
+  @SubscribeMessage('leave-room')
+  handleLeaveRoom(client: Socket, data: any, callback?: () => void): void {
+    this.leaveRoom(client);
+    if (callback && typeof callback === 'function') {
+      callback();
+    }
+  }
+
+  // Helper to force delete a room and kick everyone
+  public async forceDeleteRoom(roomId: string) {
+    console.log(`[ForceDelete] Deleting room ${roomId} and kicking all users.`);
+
+    // Notify all users in the room
+    this.server.to(roomId).emit('error', { message: '호스트가 회의를 종료했습니다.' });
+    this.server.to(roomId).emit('meeting-ended'); // Custom event for clean exit
+
+    // Disconnect all sockets in this room
+    const roomUsers = this.roomToUsers.get(roomId);
+    if (roomUsers) {
+      for (const socketId of roomUsers.keys()) {
+        const socket = this.server.sockets.sockets.get(socketId);
+        if (socket) {
+          socket.leave(roomId);
+          socket.disconnect(true);
+        }
+      }
+      this.roomToUsers.delete(roomId);
+    }
+
+    // Cleanup userId mapping
+    for (const [userId, rId] of this.userIdToRoom.entries()) {
+      if (rId === roomId) {
+        this.userIdToRoom.delete(userId);
+      }
+    }
+  }
+
+  public async leaveRoomByUserId(roomId: string, userId: string) {
+    console.log(`[LeaveByUserId] Force leaving user ${userId} from room ${roomId}`);
+
     const roomUsers = this.roomToUsers.get(roomId);
     if (!roomUsers) return;
 
-    const socketId = Array.from(roomUsers.entries()).find(([_, p]) => p.userId === userId)?.[0];
-    if (socketId) {
-      const socket = this.server.sockets.sockets.get(socketId);
+    // Find socketId for this user
+    let socketIdToRemove: string | null = null;
+    for (const [socketId, participant] of roomUsers.entries()) {
+      if (participant.userId === userId) {
+        socketIdToRemove = socketId;
+        break;
+      }
+    }
+
+    if (socketIdToRemove) {
+      const socket = this.server.sockets.sockets.get(socketIdToRemove);
       if (socket) {
-        socket.leave(roomId);
-        socket.emit('kicked', { reason: 'You have been removed from the meeting.' });
-        socket.disconnect(true);
+        this.leaveRoom(socket);
+      } else {
+        // Socket not found (already disconnected?), manually cleanup
+        const participant = roomUsers.get(socketIdToRemove);
+        if (participant) {
+          roomUsers.delete(socketIdToRemove);
+          this.userIdToRoom.delete(userId);
+
+          // Notify others
+          this.server.to(roomId).emit('user-left', { userId });
+
+          // DB Update
+          await this.prisma.participant.updateMany({
+            where: { userId, meetingRoomId: roomId, leftAt: null },
+            data: { leftAt: new Date() }
+          });
+        }
+      }
+    }
+  }
+  @SubscribeMessage('media-chunk')
+  handleMediaChunk(client: Socket, chunk: Buffer): void {
+    const roomId = Array.from(client.rooms).find(r => r !== client.id);
+
+    if (roomId) {
+      client.to(roomId).emit('media-chunk', {
+        socketId: client.id,
+        chunk: chunk,
+      });
+    }
+  }
+
+
+
+  // WebRTC Signaling Handlers
+  @SubscribeMessage('offer')
+  handleOffer(client: Socket, data: { to: string; offer: any }): void {
+    const fromUserId = client['user'].sub; // Get userId from the authenticated socket
+    client.to(data.to).emit('offer', {
+      from: client.id,
+      fromUserId: fromUserId, // Add this
+      offer: data.offer
+    });
+  }
+
+  @SubscribeMessage('answer')
+  handleAnswer(client: Socket, data: { to: string; answer: any }): void {
+    client.to(data.to).emit('answer', { from: client.id, answer: data.answer });
+  }
+
+  @SubscribeMessage('ice-candidate')
+  handleIceCandidate(client: Socket, data: { to: string; candidate: any }): void {
+    client.to(data.to).emit('ice-candidate', { from: client.id, candidate: data.candidate });
+  }
+
+  @SubscribeMessage('camera-state-changed')
+  handleCameraStateChanged(client: Socket, data: { roomId: string; userId: string; hasVideo: boolean }): void {
+    // Broadcast the camera state change to other users in the room
+    client.to(data.roomId).emit('camera-state-changed', {
+      userId: data.userId,
+      hasVideo: data.hasVideo,
+    });
+  }
+
+  @SubscribeMessage('mic-state-changed')
+  handleMicStateChanged(client: Socket, data: { roomId: string; userId: string; isMuted: boolean }): void {
+    // Update server state
+    const room = this.roomToUsers.get(data.roomId);
+    if (room && room.has(client.id)) {
+      const participant = room.get(client.id);
+      if (participant) {
+        participant.isMuted = data.isMuted;
+      }
+    }
+
+    // Broadcast the mic state change to other users in the room
+    client.to(data.roomId).emit('mic-state-changed', {
+      userId: data.userId,
+      isMuted: data.isMuted,
+    });
+  }
+
+  @SubscribeMessage('update-meeting-title')
+  async handleUpdateMeetingTitle(client: Socket, data: { roomId: string; title: string }): Promise<void> {
+    const userId = client['user']?.sub;
+    if (!userId) return;
+
+    try {
+      // 1. Verify ownership (Host check)
+      const room = await this.prisma.meetingRoom.findUnique({
+        where: { id: data.roomId },
+        select: { creatorId: true }
+      });
+
+      if (!room || room.creatorId !== userId) {
+        client.emit('error', { message: 'Only the host can edit the meeting title.' });
+        return;
       }
 
-      // Cleanup state
-      this.handleDisconnect({ id: socketId } as Socket);
+      // 2. Update DB
+      await this.prisma.meetingRoom.update({
+        where: { id: data.roomId },
+        data: { title: data.title }
+      });
+
+      // 3. Broadcast to ALL users in the room (including sender)
+      this.server.to(data.roomId).emit('meeting-title-updated', {
+        title: data.title
+      });
+
+      console.log(`Meeting ${data.roomId} title updated to "${data.title}" by ${userId}`);
+
+    } catch (error) {
+      console.error('Error updating meeting title:', error);
+      client.emit('error', { message: 'Failed to update meeting title.' });
     }
+  }
+
+  @SubscribeMessage('send-reaction')
+  handleSendReaction(client: Socket, data: { roomId: string; emoji: string }): void {
+    const userId = client['user']?.sub;
+    if (!userId) return;
+
+    // Broadcast reaction to all users in the room
+    this.server.to(data.roomId).emit('reaction-received', {
+      userId: userId,
+      emoji: data.emoji
+    });
   }
 }
