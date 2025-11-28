@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
 import { useSession } from "next-auth/react";
@@ -216,7 +216,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           }
         }
 
-        initializeMediaStream(initialVideoOn, true); // isInitial = true
+        initializeMediaStream(initialVideoOn, initialMuted, true); // isInitial = true
 
       });
 
@@ -539,7 +539,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
   }, [participants]);
 
-  const initializeMediaStream = async (requestVideo: boolean = false, isInitial: boolean = false) => {
+  const initializeMediaStream = useCallback(async (requestVideo: boolean = false, requestMuted: boolean = true, isInitial: boolean = false) => {
     try {
       console.log(`Client: Initializing media stream (Video: ${requestVideo}, Initial: ${isInitial})...`);
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -578,7 +578,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       // Initialize gain based on current mute state (or the intent to unmute if called from toggleMute)
       // Note: If called from toggleMute, we set isMuted=false BEFORE calling this, so this should be correct.
       // If called from toggleCamera (and no stream), isMuted is likely true (default), so we start muted.
-      gainNode.gain.value = isMuted ? 0 : micVolume;
+      // Use requestMuted if provided, otherwise fallback to state
+      const targetMuted = isInitial ? requestMuted : isMuted;
+      gainNode.gain.value = targetMuted ? 0 : micVolume;
 
       source.connect(gainNode);
       gainNode.connect(destination);
@@ -620,7 +622,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       socketRef.current?.emit('mic-state-changed', {
         roomId,
         userId: session?.user?.email,
-        isMuted: isMuted // This might be stale if called from toggleMute, but toggleMute emits its own event
+        isMuted: targetMuted // This might be stale if called from toggleMute, but toggleMute emits its own event
       });
 
     } catch (err) {
@@ -660,11 +662,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         if (!isInitial) alert('미디어 장치에 접근할 수 없습니다. 알 수 없는 오류가 발생했습니다.');
       }
     }
-  };
+  }, [roomId, session, selectedVideoDeviceId, selectedAudioInputDeviceId, isMuted, micVolume]);
 
   const toggleCamera = async () => {
     if (!localStreamRef.current) {
-      await initializeMediaStream(true);
+      await initializeMediaStream(true, isMuted, false);
       return;
     }
 
@@ -723,7 +725,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       // Initialize audio only
       setIsMuted(false); // Optimistically set mute to false since user clicked unmute
       newMutedState = false;
-      await initializeMediaStream(false);
+      await initializeMediaStream(false, false, false);
     } else {
       if (localStreamRef.current) {
         // If using AudioContext, mute the gain node
