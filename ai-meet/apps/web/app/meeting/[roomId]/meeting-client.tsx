@@ -26,6 +26,8 @@ interface Participant {
   avatar_url?: string;
 }
 
+type LayoutMode = 'speaker' | 'grid';
+
 export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
   const { data: session, status } = useSession();
@@ -103,8 +105,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             setIsMuted(settings.joinMuted);
             isMutedRef.current = settings.joinMuted;
           }
-          // If joinVideoOff is true, localVideoOn should be false.
-          // If joinVideoOff is false, localVideoOn should be true.
           if (settings.joinVideoOff !== undefined) {
             const shouldBeOn = !settings.joinVideoOff;
             setLocalVideoOn(shouldBeOn);
@@ -113,10 +113,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         } catch (e) {
           console.error("Failed to parse meeting settings", e);
         }
-      } else {
-        // Default behavior if no settings found (e.g. direct link join)
-        // Maybe default to Muted=true, Video=false for safety?
-        // Current defaults are Muted=true, Video=false.
       }
     }
   }, [roomId]);
@@ -127,358 +123,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, [chatMessages, showChatPanel]);
 
-  // ... (existing useEffects)
-
-  // This socket.on listener needs to be inside an useEffect or a function called from useEffect
-  // For now, I'll assume it's part of the socket initialization logic within useEffect.
-  // If it's meant to be a global listener, it should be handled differently.
-  // For the purpose of this edit, I'm leaving it as is, assuming it's a placeholder.
-  // socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
-  //   setChatMessages(prev => [...prev, data]);
-  // });
-
-  // ... (existing socket listeners)
-
-
-
-
-
-  useEffect(() => {
-    if (status === 'loading') return;
-    if (!session?.user) {
-      console.log('Client: No user found, redirecting to login.');
-      router.push('/login');
-      return;
-    }
-
-    if (isInitialized.current) {
-      return;
-    }
-    isInitialized.current = true;
-
-    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
-    console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
-    const socket = io(websocketUrl, {
-      autoConnect: false,
-      extraHeaders: {
-        'ngrok-skip-browser-warning': 'true'
-      },
-      auth: {
-        token: (session.user as { id?: string }).id || session.user.email // Use ID if available to match currentUserId
-      },
-    });
-    socketRef.current = socket;
-
-    const initialize = async () => {
-      console.log('Client: Initializing...');
-
-      const currentUserId = (session.user as { id?: string }).id || session.user?.email || 'unknown';
-      console.log('Client: currentUser set to', currentUserId);
-
-      const username = session.user?.name || session.user?.email || 'Anonymous';
-      // userProfile state removed, using session directly
-
-      try {
-        console.log('Client: Enumerating media devices...');
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        setAvailableVideoDevices(devices.filter(device => device.kind === 'videoinput'));
-        setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
-        setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
-      } catch (err) {
-        console.error('Error enumerating devices:', err);
-      }
-
-      socket.connect();
-
-      const lastConnectTimeRef = { current: 0 }; // Local ref for debounce within closure
-
-      socket.on('connect', () => {
-        const now = Date.now();
-        if (now - lastConnectTimeRef.current < 1000) {
-          console.log('Client: Ignoring rapid reconnect event.');
-          return;
-        }
-        lastConnectTimeRef.current = now;
-
-        console.log('Client: Connected to WebSocket server with socketId:', socket.id);
-
-        // Check if we are reconnecting (stream already exists)
-        if (localStreamRef.current) {
-          console.log('Client: Reconnected. Re-joining room with existing stream.');
-          socket.emit('join-room', {
-            roomId,
-            username,
-            avatar_url: session.user?.image,
-            hasVideo: localVideoOnRef.current,
-            isMuted: isMutedRef.current
-          });
-
-          // Re-sync state
-          socket.emit('camera-state-changed', {
-            roomId,
-            userId: currentUserId,
-            hasVideo: localVideoOnRef.current
-          });
-          socket.emit('mic-state-changed', {
-            roomId,
-            userId: currentUserId,
-            isMuted: isMutedRef.current
-          });
-
-          // Restart MediaRecorder if needed (sometimes it stops on disconnect)
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
-            console.log('Client: Restarting MediaRecorder after reconnect.');
-            mediaRecorderRef.current.start(300);
-          }
-          return;
-        }
-
-        socket.emit('join-room', {
-          roomId,
-          username,
-          avatar_url: session.user?.image,
-          hasVideo: false, // Will be updated after media init
-          isMuted: true // Will be updated after media init
-        });
-
-        // Initialize media stream after joining (or in parallel)
-        let initialVideoOn = false;
-        let initialMuted = true;
-
-        if (typeof window !== 'undefined') {
-          const storedSettings = sessionStorage.getItem(`meeting-settings-${roomId}`);
-          if (storedSettings) {
-            try {
-              const settings = JSON.parse(storedSettings);
-              if (settings.joinVideoOff !== undefined) initialVideoOn = !settings.joinVideoOff;
-              if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
-            } catch (e) {
-              console.error("Error parsing stored settings", e);
-            }
-          }
-        }
-
-        initializeMediaStream(initialVideoOn, initialMuted, true); // isInitial = true
-      });
-
-      socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string }) => {
-        console.log('Client: room-state received', data);
-        const filteredParticipants = data.participants.filter(p => p.userId !== currentUserId);
-
-        if (data.title) setMeetingTitle(data.title);
-        if (data.hostId && data.hostId === currentUserId) {
-          setIsHost(true);
-          console.log('Client: You are the host.');
-        }
-
-        // Populate maps immediately
-        data.participants.forEach(p => {
-          if (p.userId !== currentUserId) {
-            socketIdToUserIdMap.current[p.socketId] = p.userId;
-            userIdToSocketIdMap.current[p.userId] = p.socketId;
-          }
-        });
-
-        setParticipants(filteredParticipants);
-      });
-
-      socket.on('user-joined', async (data: Participant & { socketId: string }) => {
-        console.log(`Client: New user ${data.username} joined with socketId ${data.socketId}.`);
-        if (data.userId === currentUserId) return;
-
-        const newParticipant = { ...data };
-
-        // Populate maps immediately
-        socketIdToUserIdMap.current[data.socketId] = data.userId;
-        userIdToSocketIdMap.current[data.userId] = data.socketId;
-
-        setParticipants(prev => [...prev, newParticipant]);
-      });
-
-      socket.on('user-left', (data: { userId: string }) => {
-        console.log(`Client: User ${data.userId} left`);
-        const socketId = userIdToSocketIdMap.current[data.userId];
-        if (socketId) {
-          cleanupMediaSource(socketId);
-          delete socketIdToUserIdMap.current[socketId];
-          delete userIdToSocketIdMap.current[data.userId];
-        }
-        setParticipants(prev => prev.filter(p => p.userId !== data.userId));
-      });
-
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
-        const { socketId, chunk } = data;
-        const blob = new Blob([chunk], { type: 'video/webm' });
-        const sourceBuffer = sourceBuffersRef.current[socketId];
-        const mediaSource = mediaSourcesRef.current[socketId];
-
-        if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
-          try {
-            sourceBuffer.appendBuffer(await blob.arrayBuffer());
-          } catch (e) {
-            if (e instanceof DOMException && e.name === 'InvalidStateError') {
-              console.warn(`Ignored InvalidStateError for ${socketId} (likely cleanup race condition)`);
-            } else {
-              console.error(`Error appending buffer for ${socketId}`, e);
-            }
-          }
-        } else {
-          if (!chunkQueueRef.current[socketId]) {
-            chunkQueueRef.current[socketId] = [];
-          }
-          chunkQueueRef.current[socketId].push(blob);
-        }
-      });
-
-      socket.on('mic-state-changed', (data: { userId: string; isMuted: boolean }) => {
-        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
-      });
-
-      socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
-        setChatMessages(prev => [...prev, data]);
-      });
-
-      socket.on('meeting-title-updated', (data: { title: string }) => {
-        setMeetingTitle(data.title);
-      });
-
-      socket.on('reaction-received', (data: { userId: string; emoji: string }) => {
-        const newReaction: Reaction = {
-          id: Math.random().toString(36).substr(2, 9),
-          emoji: data.emoji,
-          userId: data.userId
-        };
-        setReactions(prev => [...prev, newReaction]);
-
-        // Cleanup after animation (2s)
-        setTimeout(() => {
-          setReactions(prev => prev.filter(r => r.id !== newReaction.id));
-        }, 2000);
-      });
-
-      socket.on('chat-error', (data: { message: string }) => {
-        console.error('[ChatDebug] Chat error received:', data.message);
-        if (data.message.includes('Room not found') || data.message.includes('Participant not found')) {
-          console.log('[ChatDebug] Room/Participant missing on server. Attempting to re-join...');
-          socket.emit('join-room', {
-            roomId,
-            username,
-            avatar_url: session.user?.image,
-            hasVideo: localVideoOn,
-            isMuted: isMuted
-          });
-        } else {
-          alert(`채팅 전송 실패: ${data.message}`);
-        }
-      });
-
-      socket.on('disconnect', (reason) => {
-        console.log('Client: Disconnected from WebSocket server', reason);
-      });
-      socket.on('connect_error', (error) => {
-        console.error('Client: WebSocket connection error', error);
-      });
-
-      socket.on('error', (data: { message: string }) => {
-        console.error('Client: Socket error:', data.message);
-        alert(data.message);
-        router.push('/');
-      });
-    };
-
-    initialize();
-
-    const mediaSources = mediaSourcesRef.current;
-
-    return () => {
-      console.log('Client: useEffect cleanup');
-      mediaRecorderRef.current?.stop();
-      localStreamRef.current?.getTracks().forEach(track => track.stop());
-
-      // Cleanup Audio Context
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
-
-      Object.keys(mediaSources).forEach(socketId => {
-        cleanupMediaSource(socketId);
-      });
-
-      socket.emit('leave-room'); // Notify server immediately on unmount
-      socket.disconnect();
-      socketRef.current = null;
-      socketIdToUserIdMap.current = {};
-      setParticipants([]);
-      isInitialized.current = false; // Allow re-initialization on remount
-    };
-  }, [roomId, router, session, status]);
-
-  // Handle browser tab close / refresh
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      // Use Beacon or Fetch with keepalive for reliable exit
-      fetch(`/api/meeting/${roomId}/leave`, {
-        method: 'POST',
-        keepalive: true,
-        headers: { 'Content-Type': 'application/json' }
-      });
-
-      socketRef.current?.disconnect();
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      // Also trigger on component unmount (client-side navigation)
-      handleBeforeUnload();
-    };
-  }, [roomId]);
-
-
-  useEffect(() => {
-    const setAudioOutput = async () => {
-      if (selectedAudioOutputDeviceId) {
-        Object.values(remoteVideoRefs.current).forEach(videoElement => {
-          if (videoElement && typeof videoElement.setSinkId === 'function') {
-            try {
-              videoElement.setSinkId(selectedAudioOutputDeviceId);
-            } catch (error) {
-              console.error('Error setting audio output:', error);
-            }
-          }
-        });
-      }
-    };
-    setAudioOutput();
-  }, [selectedAudioOutputDeviceId]);
-
-  useEffect(() => {
-    Object.values(remoteVideoRefs.current).forEach(videoElement => {
-      if (videoElement) {
-        videoElement.volume = volume;
-      }
-    });
-  }, [volume, participants]);
-
-  // Update Mic Gain when micVolume changes
-  useEffect(() => {
-    if (gainNodeRef.current) {
-      gainNodeRef.current.gain.value = micVolume;
-    }
-  }, [micVolume]);
-
-  useEffect(() => {
-    if (localStream && localVideoRef.current) {
-      localVideoRef.current.srcObject = localStream;
-    }
-  }, [localStream]);
-
   const setupMediaRecorder = (stream: MediaStream) => {
     if (mediaRecorderRef.current) {
       mediaRecorderRef.current.stop();
     }
     if (socketRef.current && stream) {
-      // Validate tracks
       const videoTracks = stream.getVideoTracks();
       const audioTracks = stream.getAudioTracks();
 
@@ -493,8 +142,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         'video/webm; codecs=vp8,opus',
         'video/webm; codecs=vp9,opus',
         'video/webm; codecs=h264,opus',
-        'video/mp4', // Safari 14.1+
-        '' // Default
+        'video/mp4',
+        ''
       ];
 
       let options: MediaRecorderOptions = {};
@@ -514,6 +163,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       console.log(`setupMediaRecorder: Selected mimeType: ${selectedMimeType}`);
 
+      if (socketRef.current) {
+        socketRef.current.emit('media-mime-type', { mimeType: selectedMimeType || 'video/webm; codecs=vp8,opus' });
+      }
+
       try {
         const mediaRecorder = new MediaRecorder(stream, options);
 
@@ -530,11 +183,35 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
-  const setupMediaSource = (userId: string, socketId: string) => {
+  const mimeTypesRef = useRef<{ [socketId: string]: string }>({});
+
+  const processChunkQueue = async (socketId: string) => {
+    const sourceBuffer = sourceBuffersRef.current[socketId];
+    const mediaSource = mediaSourcesRef.current[socketId];
+
+    if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open' && chunkQueueRef.current[socketId]?.length > 0) {
+      const nextChunk = chunkQueueRef.current[socketId].shift();
+      if (nextChunk) {
+        try {
+          sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+        } catch (e) {
+          // Ignore InvalidStateError during cleanup
+        }
+      }
+    }
+  };
+
+  const setupSourceBufferListeners = (sourceBuffer: SourceBuffer, socketId: string, mediaSource: MediaSource) => {
+    sourceBuffer.addEventListener('updateend', () => {
+      processChunkQueue(socketId);
+    });
+  };
+
+  const setupMediaSource = (userId: string, socketId: string, mimeType: string) => {
     if (mediaSourcesRef.current[socketId] || !remoteVideoRefs.current[userId]) {
       return;
     }
-    console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId}`);
+    console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId}, mimeType: ${mimeType}`);
     const mediaSource = new MediaSource();
     mediaSourcesRef.current[socketId] = mediaSource;
     const videoElement = remoteVideoRefs.current[userId];
@@ -547,30 +224,24 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     mediaSource.addEventListener('sourceopen', () => {
       console.log(`MediaSource opened for ${socketId}`);
       try {
-        const mime = 'video/webm; codecs="vp8, opus"';
+        const mime = mimeType === 'default' || !mimeType ? 'video/webm; codecs="vp8, opus"' : mimeType;
+
         if (!MediaSource.isTypeSupported(mime)) {
-          console.error(`${mime} is not supported`);
+          console.error(`${mime} is not supported by this browser.`);
+          if (MediaSource.isTypeSupported('video/webm')) {
+            console.log('Falling back to generic video/webm');
+            const sourceBuffer = mediaSource.addSourceBuffer('video/webm');
+            sourceBuffersRef.current[socketId] = sourceBuffer;
+            setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
+            processChunkQueue(socketId);
+            return;
+          }
           return;
         }
         const sourceBuffer = mediaSource.addSourceBuffer(mime);
         sourceBuffersRef.current[socketId] = sourceBuffer;
-
-        sourceBuffer.addEventListener('updateend', async () => {
-          if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
-            const nextChunk = chunkQueueRef.current[socketId].shift();
-            if (nextChunk) {
-              try {
-                sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
-              } catch (e) {
-                if (e instanceof DOMException && e.name === 'InvalidStateError') {
-                  console.warn(`Ignored InvalidStateError in queue for ${socketId}`);
-                } else {
-                  console.error(`Error appending queued buffer for ${socketId}`, e);
-                }
-              }
-            }
-          }
-        });
+        setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
+        processChunkQueue(socketId);
       } catch (e) {
         console.error('Error adding source buffer:', e);
       }
@@ -601,18 +272,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     delete chunkQueueRef.current[socketId];
   };
 
-
-
-  // Effect to set up MediaSource for participants when they are added and video elements are ready
-  useEffect(() => {
-    participants.forEach(p => {
-      const socketId = userIdToSocketIdMap.current[p.userId];
-      if (socketId && !mediaSourcesRef.current[socketId] && remoteVideoRefs.current[p.userId]) {
-        setupMediaSource(p.userId, socketId);
-      }
-    });
-  }, [participants]);
-
   const initializeMediaStream = useCallback(async (requestVideo: boolean = false, requestMuted: boolean = true, isInitial: boolean = false) => {
     try {
       console.log(`Client: Initializing media stream (Video: ${requestVideo}, Initial: ${isInitial})...`);
@@ -622,10 +281,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
       setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
 
-      // Check if camera exists
       if (requestVideo && videoDevices.length === 0) {
         console.warn('No camera found. Falling back to audio-only.');
-        // Alert removed as per user request
         requestVideo = false;
       }
 
@@ -642,17 +299,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         audio: audioConstraint
       });
 
-      // --- Audio Processing for Volume Control ---
       const AudioContextClass = window.AudioContext || (window as unknown as Window & { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioContext = new AudioContextClass();
       const source = audioContext.createMediaStreamSource(stream);
       const gainNode = audioContext.createGain();
       const destination = audioContext.createMediaStreamDestination();
 
-      // Initialize gain based on current mute state (or the intent to unmute if called from toggleMute)
-      // Note: If called from toggleMute, we set isMuted=false BEFORE calling this, so this should be correct.
-      // If called from toggleCamera (and no stream), isMuted is likely true (default), so we start muted.
-      // Use requestMuted if provided, otherwise fallback to state
       const targetMuted = isInitial ? requestMuted : isMuted;
       gainNode.gain.value = targetMuted ? 0 : micVolume;
 
@@ -664,14 +316,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       audioSourceRef.current = source;
       audioDestinationRef.current = destination;
 
-      // Create a mixed stream for MediaRecorder
       const processedAudioTrack = destination.stream.getAudioTracks()[0];
       const tracks = [processedAudioTrack];
       if (requestVideo) {
         tracks.unshift(...stream.getVideoTracks());
       }
       const mixedStream = new MediaStream(tracks);
-      // -------------------------------------------
 
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
@@ -692,29 +342,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       }
 
-      // Emit initial mic state (which should be unmuted if we just initialized)
       socketRef.current?.emit('mic-state-changed', {
         roomId,
         userId: session?.user?.email,
-        isMuted: targetMuted // This might be stale if called from toggleMute, but toggleMute emits its own event
+        isMuted: targetMuted
       });
 
     } catch (err) {
       console.error('Error accessing media devices:', err);
-
-      // Retry logic for NotReadableError (often caused by rapid reloads or zombie locks)
       if (err instanceof DOMException && err.name === 'NotReadableError') {
         console.log('Camera locked. Retrying in 1 second...');
         await new Promise(resolve => setTimeout(resolve, 1000));
         try {
-          // Retry without specific deviceId to be safe
           await navigator.mediaDevices.getUserMedia({
             video: true,
             audio: selectedAudioInputDeviceId ? { deviceId: { exact: selectedAudioInputDeviceId } } : true
           });
-          // ... (Duplicate success logic or extract to function - for now, let's just recurse or handle simply)
-          // To avoid code duplication, it's better to just alert for now, or use a recursive approach with a retry counter.
-          // Let's alert with a specific "Retry" suggestion.
           alert('카메라가 일시적으로 잠겨있습니다. 1초 뒤 다시 시도하거나 브라우저를 완전히 껐다 켜주세요.');
           return;
         } catch (retryErr) {
@@ -726,17 +369,230 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         if (err.name === 'NotAllowedError') {
           alert('카메라/마이크 권한이 거부되었습니다. 브라우저 주소창의 자물쇠 아이콘을 클릭하여 권한을 허용해주세요.');
         } else if (err.name === 'NotReadableError') {
-          if (!isInitial) alert('카메라 하드웨어 오류: 장치가 응답하지 않습니다. (잠시 후 다시 시도하거나 컴퓨터를 재부팅해주세요)');
+          if (!isInitial) alert('카메라 하드웨어 오류: 장치가 응답하지 않습니다.');
         } else if (err.name === 'NotFoundError') {
-          if (!isInitial) alert('카메라/마이크를 찾을 수 없습니다. 장치가 올바르게 연결되었는지 확인해주세요.');
+          if (!isInitial) alert('카메라/마이크를 찾을 수 없습니다.');
         } else {
           if (!isInitial) alert(`미디어 장치 오류: ${err.message}`);
         }
       } else {
-        if (!isInitial) alert('미디어 장치에 접근할 수 없습니다. 알 수 없는 오류가 발생했습니다.');
+        if (!isInitial) alert('미디어 장치에 접근할 수 없습니다.');
       }
     }
   }, [roomId, session, selectedVideoDeviceId, selectedAudioInputDeviceId, isMuted, micVolume]);
+
+  useEffect(() => {
+    if (status === 'loading') return;
+    if (!session?.user) {
+      router.push('/login');
+      return;
+    }
+
+    if (isInitialized.current) return;
+    isInitialized.current = true;
+
+    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
+    const socket = io(websocketUrl, {
+      autoConnect: false,
+      extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
+      auth: { token: (session.user as { id?: string }).id || session.user.email },
+    });
+    socketRef.current = socket;
+
+    const initialize = async () => {
+      console.log('Client: Initializing...');
+      const currentUserId = (session.user as { id?: string }).id || session.user?.email || 'unknown';
+      const username = session.user?.name || session.user?.email || 'Anonymous';
+
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setAvailableVideoDevices(devices.filter(device => device.kind === 'videoinput'));
+        setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
+        setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
+      } catch (err) {
+        console.error('Error enumerating devices:', err);
+      }
+
+      socket.connect();
+      const lastConnectTimeRef = { current: 0 };
+
+      socket.on('connect', () => {
+        const now = Date.now();
+        if (now - lastConnectTimeRef.current < 1000) return;
+        lastConnectTimeRef.current = now;
+
+        if (localStreamRef.current) {
+          socket.emit('join-room', {
+            roomId,
+            username,
+            avatar_url: session.user?.image,
+            hasVideo: localVideoOnRef.current,
+            isMuted: isMutedRef.current
+          });
+          socket.emit('camera-state-changed', { roomId, userId: currentUserId, hasVideo: localVideoOnRef.current });
+          socket.emit('mic-state-changed', { roomId, userId: currentUserId, isMuted: isMutedRef.current });
+
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
+            mediaRecorderRef.current.start(300);
+          }
+          return;
+        }
+
+        socket.emit('join-room', {
+          roomId,
+          username,
+          avatar_url: session.user?.image,
+          hasVideo: false,
+          isMuted: true
+        });
+
+        let initialVideoOn = false;
+        let initialMuted = true;
+        if (typeof window !== 'undefined') {
+          const storedSettings = sessionStorage.getItem(`meeting-settings-${roomId}`);
+          if (storedSettings) {
+            try {
+              const settings = JSON.parse(storedSettings);
+              if (settings.joinVideoOff !== undefined) initialVideoOn = !settings.joinVideoOff;
+              if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
+            } catch (e) { }
+          }
+        }
+        initializeMediaStream(initialVideoOn, initialMuted, true);
+      });
+
+      socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string }) => {
+        const filteredParticipants = data.participants.filter(p => p.userId !== currentUserId);
+        if (data.title) setMeetingTitle(data.title);
+        if (data.hostId && data.hostId === currentUserId) setIsHost(true);
+
+        data.participants.forEach(p => {
+          if (p.userId !== currentUserId) {
+            socketIdToUserIdMap.current[p.socketId] = p.userId;
+            userIdToSocketIdMap.current[p.userId] = p.socketId;
+          }
+        });
+        setParticipants(filteredParticipants);
+      });
+
+      socket.on('user-joined', async (data: Participant & { socketId: string }) => {
+        if (data.userId === currentUserId) return;
+        socketIdToUserIdMap.current[data.socketId] = data.userId;
+        userIdToSocketIdMap.current[data.userId] = data.socketId;
+        setParticipants(prev => [...prev, data]);
+      });
+
+      socket.on('user-left', (data: { userId: string }) => {
+        const socketId = userIdToSocketIdMap.current[data.userId];
+        if (socketId) {
+          cleanupMediaSource(socketId);
+          delete socketIdToUserIdMap.current[socketId];
+          delete userIdToSocketIdMap.current[data.userId];
+        }
+        setParticipants(prev => prev.filter(p => p.userId !== data.userId));
+      });
+
+      socket.on('media-mime-type', (data: { socketId: string, mimeType: string }) => {
+        mimeTypesRef.current[data.socketId] = data.mimeType;
+        const userId = socketIdToUserIdMap.current[data.socketId];
+        if (userId && remoteVideoRefs.current[userId] && !mediaSourcesRef.current[data.socketId]) {
+          setupMediaSource(userId, data.socketId, data.mimeType);
+        }
+      });
+
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
+        const { socketId, chunk } = data;
+        const blob = new Blob([chunk], { type: 'video/webm' });
+
+        if (!mediaSourcesRef.current[socketId]) {
+          const userId = socketIdToUserIdMap.current[socketId];
+          const mimeType = mimeTypesRef.current[socketId];
+          if (userId && remoteVideoRefs.current[userId] && mimeType) {
+            setupMediaSource(userId, socketId, mimeType);
+          } else if (userId && remoteVideoRefs.current[userId] && !mimeType) {
+            console.warn(`Received chunk for ${socketId} but no mimeType yet. Defaulting to VP8.`);
+            mimeTypesRef.current[socketId] = 'video/webm; codecs="vp8, opus"';
+            setupMediaSource(userId, socketId, 'video/webm; codecs="vp8, opus"');
+          }
+        }
+
+        const sourceBuffer = sourceBuffersRef.current[socketId];
+        const mediaSource = mediaSourcesRef.current[socketId];
+
+        if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
+          try {
+            sourceBuffer.appendBuffer(await blob.arrayBuffer());
+          } catch (e) {
+            // Ignore
+          }
+        } else {
+          if (!chunkQueueRef.current[socketId]) chunkQueueRef.current[socketId] = [];
+          chunkQueueRef.current[socketId].push(blob);
+        }
+      });
+
+      socket.on('mic-state-changed', (data: { userId: string; isMuted: boolean }) => {
+        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
+      });
+
+      socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
+        setChatMessages(prev => [...prev, data]);
+      });
+
+      socket.on('meeting-title-updated', (data: { title: string }) => {
+        setMeetingTitle(data.title);
+      });
+
+      socket.on('reaction-received', (data: { userId: string; emoji: string }) => {
+        const newReaction: Reaction = {
+          id: Math.random().toString(36).substr(2, 9),
+          emoji: data.emoji,
+          userId: data.userId
+        };
+        setReactions(prev => [...prev, newReaction]);
+        setTimeout(() => {
+          setReactions(prev => prev.filter(r => r.id !== newReaction.id));
+        }, 2000);
+      });
+
+      socket.on('chat-error', (data: { message: string }) => {
+        if (data.message.includes('Room not found') || data.message.includes('Participant not found')) {
+          socket.emit('join-room', {
+            roomId,
+            username,
+            avatar_url: session.user?.image,
+            hasVideo: localVideoOn,
+            isMuted: isMuted
+          });
+        } else {
+          alert(`채팅 전송 실패: ${data.message}`);
+        }
+      });
+
+      socket.on('disconnect', (reason) => {
+        console.log('Client: Disconnected', reason);
+      });
+      socket.on('error', (data: { message: string }) => {
+        alert(data.message);
+        router.push('/');
+      });
+    };
+
+    initialize();
+
+    return () => {
+      mediaRecorderRef.current?.stop();
+      localStreamRef.current?.getTracks().forEach(track => track.stop());
+      if (audioContextRef.current) audioContextRef.current.close();
+      Object.keys(mediaSourcesRef.current).forEach(socketId => cleanupMediaSource(socketId));
+      socket.emit('leave-room');
+      socket.disconnect();
+      socketRef.current = null;
+      socketIdToUserIdMap.current = {};
+      setParticipants([]);
+      isInitialized.current = false;
+    };
+  }, [roomId, router, session, status]); // Removed initializeMediaStream dependency to avoid loop, but it's stable via useCallback
 
   const toggleCamera = async () => {
     if (!localStreamRef.current) {
@@ -757,7 +613,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         hasVideo: videoTrack.enabled,
       });
     } else {
-      // Stream exists but no video track (Audio only mode -> Video mode)
       try {
         const videoConstraint: boolean | MediaTrackConstraints = selectedVideoDeviceId
           ? { deviceId: { exact: selectedVideoDeviceId } }
@@ -771,7 +626,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setLocalVideoOn(true);
         localVideoOnRef.current = true;
 
-        // We need to reconstruct the mixed stream for MediaRecorder
         if (audioDestinationRef.current) {
           const processedAudioTrack = audioDestinationRef.current.stream.getAudioTracks()[0];
           const mixedStream = new MediaStream([
@@ -799,21 +653,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     let newMutedState = !isMuted;
 
     if (!localStreamRef.current) {
-      // Initialize audio only
-      setIsMuted(false); // Optimistically set mute to false since user clicked unmute
+      setIsMuted(false);
       isMutedRef.current = false;
       newMutedState = false;
       await initializeMediaStream(false, false, false);
     } else {
       if (localStreamRef.current) {
-        // If using AudioContext, mute the gain node
         if (gainNodeRef.current) {
-          // Toggle mute state
           setIsMuted(newMutedState);
           isMutedRef.current = newMutedState;
           gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
         } else {
-          // Fallback
           const audioTrack = localStreamRef.current.getAudioTracks()[0];
           if (audioTrack) {
             audioTrack.enabled = !audioTrack.enabled;
@@ -825,7 +675,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       }
     }
 
-    // Emit state change
     socketRef.current?.emit('mic-state-changed', {
       roomId,
       userId: session?.user?.email,
