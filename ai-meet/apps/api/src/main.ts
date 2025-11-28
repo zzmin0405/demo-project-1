@@ -9,7 +9,11 @@ async function bootstrap() {
 
   if (corsOrigin) {
     app.enableCors({
-      origin: true,
+      origin: [
+        'http://localhost:3000',
+        'https://demo-project-1-rho.vercel.app',
+        'https://demo-project-1.vercel.app'
+      ],
       credentials: true,
       allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
     });
