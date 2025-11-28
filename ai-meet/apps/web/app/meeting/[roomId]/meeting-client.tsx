@@ -66,6 +66,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [chatMessages, setChatMessages] = useState<{ userId: string; username: string; message: string; timestamp: string; avatar_url?: string }[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isHoveringRef = useRef(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -855,6 +857,27 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     // Let's rely on server broadcast for consistency for now.
   };
 
+  // --- Auto-hide Controls Logic ---
+  // --- Auto-hide Controls Logic ---
+  const resetControlsTimer = useCallback(() => {
+    // Note: We do NOT force setShowControls(true) here anymore.
+    // This function only resets the hide timer if called.
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+    }
+    controlsTimeoutRef.current = setTimeout(() => {
+      setShowControls(false);
+    }, 3000);
+  }, []);
+
+  useEffect(() => {
+    // Initial timer start
+    resetControlsTimer();
+    return () => {
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    };
+  }, [resetControlsTimer]);
+
   // --- UI Components ---
 
   const ParticipantCard = ({
@@ -944,6 +967,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     );
   };
 
+
+
   // --- Render Logic ---
 
   const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
@@ -957,9 +982,26 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <ReactionOverlay reactions={reactions} />
         {/* Main Content Area */}
         <main
-          className="flex-1 bg-neutral-900 relative p-4 flex items-center justify-center transition-all duration-300 overflow-hidden group min-h-0"
-          onMouseEnter={() => setShowControls(true)}
-          onMouseLeave={() => setShowControls(false)}
+          className="flex-1 bg-neutral-900 relative p-4 pb-20 md:pb-4 flex items-center justify-center transition-all duration-300 overflow-hidden group min-h-0"
+          onMouseMove={() => {
+            // Only reset timer if controls are ALREADY visible.
+            // Moving mouse should NOT show controls if they are hidden.
+            if (showControls) {
+              resetControlsTimer();
+            }
+          }}
+          onClick={() => {
+            // Unified toggle logic:
+            // If visible -> Hide
+            // If hidden -> Show (and start timer)
+            if (showControls) {
+              setShowControls(false);
+              if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+            } else {
+              setShowControls(true);
+              resetControlsTimer();
+            }
+          }}
         >
 
           {/* Top Bar (View Switcher) - Moved inside Main */}
@@ -968,7 +1010,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
               showControls ? "translate-y-0" : "-translate-y-full"
             )
-          }>
+          }
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
               <span className="font-semibold px-2">{meetingTitle}</span>
               {isHost && (
@@ -1041,7 +1085,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           ) : (
             // Grid View
             <div className={cn(
-              "w-full h-full grid gap-4 p-4 pt-14 min-h-0",
+              "w-full h-full grid gap-2 p-2 md:gap-4 md:p-4 pt-14 min-h-0",
               (participants.length + 1) <= 1 ? "grid-cols-1 grid-rows-1" :
                 (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2 grid-rows-2 md:grid-rows-1" :
                   (participants.length + 1) <= 4 ? "grid-cols-2 grid-rows-2" :
@@ -1072,64 +1116,70 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             <ReactionBar onReaction={handleSendReaction} />
           </div>
 
-          {/* Control Bar - Fixed Floating Pill */}
+          {/* Control Bar - Solid on Mobile, Floating Pill on Desktop */}
           <div className={cn(
-            "fixed bottom-8 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-4 bg-black/80 backdrop-blur-xl border border-white/10 rounded-full px-6 py-3 shadow-2xl",
+            "fixed z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-2 md:space-x-4 shadow-2xl",
+            // Mobile Styles: Bottom fixed, full width, black background
+            "bottom-0 left-0 right-0 h-16 bg-black border-t border-white/10 rounded-none px-4",
+            // Desktop Styles: Floating pill, centered, rounded
+            "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:h-auto md:bg-black/80 md:backdrop-blur-xl md:border md:rounded-full md:px-6 md:py-3 md:w-auto",
             showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
-          )}>
+          )}
+            onClick={(e) => e.stopPropagation()}
+          >
             <Button
               variant={isMuted ? "destructive" : "secondary"}
               size="icon"
-              className="rounded-full w-12 h-12"
+              className="rounded-full w-10 h-10 md:w-12 md:h-12"
               onClick={toggleMute}
             >
-              {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              {isMuted ? <MicOff className="w-4 h-4 md:w-5 md:h-5" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
             </Button>
 
             <Button
               variant={localVideoOn ? "secondary" : "destructive"}
               size="icon"
-              className="rounded-full w-12 h-12"
+              className="rounded-full w-10 h-10 md:w-12 md:h-12"
               onClick={toggleCamera}
             >
-              {localVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+              {localVideoOn ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
             </Button>
 
-            <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowMorePanel(true)}>
-              <Settings className="w-5 h-5" />
+            <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowMorePanel(true)}>
+              <Settings className="w-4 h-4 md:w-5 md:h-5" />
             </Button>
 
-            <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowParticipantsPanel(true)}>
-              <Users className="w-5 h-5" />
+            <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowParticipantsPanel(true)}>
+              <Users className="w-4 h-4 md:w-5 md:h-5" />
             </Button>
 
             <Button
               variant={showChatPanel ? "default" : "secondary"}
               size="icon"
-              className="rounded-full w-12 h-12"
+              className="rounded-full w-10 h-10 md:w-12 md:h-12"
               onClick={() => setShowChatPanel(!showChatPanel)}
             >
-              <MessageSquare className="w-5 h-5" />
+              <MessageSquare className="w-4 h-4 md:w-5 md:h-5" />
             </Button>
 
-            <div className="w-px h-8 bg-white/20 mx-2" />
+            <div className="w-px h-6 md:h-8 bg-white/20 mx-1 md:mx-2" />
 
             <Button
               variant="destructive"
-              className="rounded-full px-6 h-12 font-semibold bg-red-600 hover:bg-red-700"
+              className="rounded-full px-4 md:px-6 h-10 md:h-12 font-semibold bg-red-600 hover:bg-red-700 text-sm md:text-base"
               onClick={handleEndCallClick}
             >
-              End Call
+              End
             </Button>
           </div>
         </main>
 
-        {/* Chat Panel (Right Sidebar on Desktop, Bottom on Mobile) */}
+        {/* Chat Panel (Right Sidebar on Desktop, Full Overlay on Mobile) */}
         {showChatPanel && (
-          <div className="w-full h-[50vh] md:w-96 md:h-full border-t md:border-t-0 md:border-l bg-background flex-shrink-0 transition-all duration-300 z-30">
+          <div className="fixed inset-0 z-50 md:static md:z-auto md:w-96 md:border-l bg-background h-full flex-shrink-0 transition-all duration-300">
             <ChatPanel
               messages={chatMessages}
-              currentUserId={(session?.user as { id?: string })?.id || session?.user?.email}
+              currentUserId={(session?.user as { id?: string }).id || session?.user?.email}
               newMessage={newMessage}
               onNewMessageChange={setNewMessage}
               onSendMessage={sendMessage}
@@ -1138,9 +1188,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           </div>
         )}
       </div>
-
-      {/* Controls moved inside main */}
-
 
       {/* Participants Panel (Modal) */}
       {

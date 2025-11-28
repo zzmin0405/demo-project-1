@@ -20,7 +20,7 @@ const DialogContent = React.forwardRef<
     HTMLDivElement,
     React.HTMLAttributes<HTMLDivElement>
 >(({ className, children, ...props }, ref) => (
-    <div ref={ref} className={cn("grid w-full max-w-lg gap-6 border bg-background p-10 shadow-lg duration-200 sm:rounded-xl", className)} {...props}>
+    <div ref={ref} className={cn("grid w-full max-w-lg gap-4 border bg-background p-4 sm:p-10 shadow-lg duration-200 sm:rounded-xl max-h-[85vh] overflow-y-auto w-[95vw] sm:w-full", className)} {...props}>
         {children}
     </div>
 ))

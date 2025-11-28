@@ -43,7 +43,7 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
         <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
             <DialogContent className="sm:max-w-[600px] border-border/50 bg-background/95 backdrop-blur-xl shadow-2xl">
                 <DialogHeader>
-                    <DialogTitle className="text-2xl font-bold bg-gradient-to-r from-primary to-purple-500 bg-clip-text text-transparent">
+                    <DialogTitle className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-primary to-purple-500 bg-clip-text text-transparent">
                         {dict.modal.title}
                     </DialogTitle>
                     <DialogDescription>
@@ -51,7 +51,7 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
                     </DialogDescription>
                 </DialogHeader>
 
-                <div className="grid gap-8 py-6">
+                <div className="grid gap-4 sm:gap-8 py-4 sm:py-6">
                     <div className="grid gap-3">
                         <Label htmlFor="title" className="text-sm font-medium text-muted-foreground">
                             {dict.modal.topicLabel}
@@ -70,41 +70,41 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
                             <Settings2 className="w-4 h-4" /> {dict.modal.optionsTitle}
                         </h4>
 
-                        <div className="grid gap-10 p-12 rounded-3xl bg-secondary/40 border border-border/50 shadow-inner">
-                            <div className="flex items-center justify-between gap-8">
+                        <div className="grid gap-3 sm:gap-10 p-3 sm:p-12 rounded-3xl bg-secondary/40 border border-border/50 shadow-inner">
+                            <div className="flex items-center justify-between gap-3 sm:gap-8">
                                 <div className="space-y-1">
-                                    <Label className="text-lg flex items-center gap-3">
-                                        <MessageSquare className="w-5 h-5 text-blue-400" /> {dict.modal.saveChat}
+                                    <Label className="text-sm sm:text-lg flex items-center gap-2 sm:gap-3">
+                                        <MessageSquare className="w-4 h-4 sm:w-5 sm:h-5 text-blue-400" /> {dict.modal.saveChat}
                                     </Label>
-                                    <p className="text-sm text-muted-foreground">
+                                    <p className="text-[10px] sm:text-sm text-muted-foreground hidden sm:block">
                                         {dict.modal.saveChatDesc}
                                     </p>
                                 </div>
-                                <Switch checked={isChatSaved} onCheckedChange={setIsChatSaved} />
+                                <Switch checked={isChatSaved} onCheckedChange={setIsChatSaved} className="scale-75 sm:scale-100" />
                             </div>
 
-                            <div className="flex items-center justify-between gap-8">
+                            <div className="flex items-center justify-between gap-3 sm:gap-8">
                                 <div className="space-y-1">
-                                    <Label className="text-lg flex items-center gap-3">
-                                        <Mic className="w-5 h-5 text-red-400" /> {dict.modal.muteEntry}
+                                    <Label className="text-sm sm:text-lg flex items-center gap-2 sm:gap-3">
+                                        <Mic className="w-4 h-4 sm:w-5 sm:h-5 text-red-400" /> {dict.modal.muteEntry}
                                     </Label>
-                                    <p className="text-sm text-muted-foreground">
+                                    <p className="text-[10px] sm:text-sm text-muted-foreground hidden sm:block">
                                         {dict.modal.muteEntryDesc}
                                     </p>
                                 </div>
-                                <Switch checked={joinMuted} onCheckedChange={setJoinMuted} />
+                                <Switch checked={joinMuted} onCheckedChange={setJoinMuted} className="scale-75 sm:scale-100" />
                             </div>
 
-                            <div className="flex items-center justify-between gap-8">
+                            <div className="flex items-center justify-between gap-3 sm:gap-8">
                                 <div className="space-y-1">
-                                    <Label className="text-lg flex items-center gap-3">
-                                        <Video className="w-5 h-5 text-purple-400" /> {dict.modal.videoOffEntry}
+                                    <Label className="text-sm sm:text-lg flex items-center gap-2 sm:gap-3">
+                                        <Video className="w-4 h-4 sm:w-5 sm:h-5 text-purple-400" /> {dict.modal.videoOffEntry}
                                     </Label>
-                                    <p className="text-sm text-muted-foreground">
+                                    <p className="text-[10px] sm:text-sm text-muted-foreground hidden sm:block">
                                         {dict.modal.videoOffEntryDesc}
                                     </p>
                                 </div>
-                                <Switch checked={joinVideoOff} onCheckedChange={setJoinVideoOff} />
+                                <Switch checked={joinVideoOff} onCheckedChange={setJoinVideoOff} className="scale-75 sm:scale-100" />
                             </div>
                         </div>
                     </div>
