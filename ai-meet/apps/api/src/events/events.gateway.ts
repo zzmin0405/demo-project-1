@@ -21,12 +21,8 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: [
-      'http://localhost:3000',
-      'https://demo-project-1-rho.vercel.app',
-      'https://demo-project-1.vercel.app'
-    ],
-    credentials: true,
+    origin: '*',
+    credentials: false,
     methods: ['GET', 'POST'],
     allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
   },
