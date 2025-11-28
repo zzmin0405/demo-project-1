@@ -360,7 +360,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
     const socket = io(websocketUrl, {
       autoConnect: false,
-      transports: ['websocket'], // Force WebSocket to avoid CORS preflight issues with ngrok
       extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
       auth: { token: (session.user as { id?: string }).id || session.user.email },
     });
