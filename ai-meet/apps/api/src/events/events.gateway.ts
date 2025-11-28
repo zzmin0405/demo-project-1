@@ -21,11 +21,10 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: true,
-    credentials: true,
+    origin: '*',
+    credentials: false,
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
-    exposedHeaders: ['Access-Control-Allow-Origin'],
   },
   transports: ['websocket', 'polling'],
 })

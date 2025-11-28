@@ -9,20 +9,18 @@ async function bootstrap() {
 
   if (corsOrigin) {
     app.enableCors({
-      origin: true,
-      credentials: true,
+      origin: '*',
+      credentials: false,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
-      exposedHeaders: ['Access-Control-Allow-Origin'],
     });
     console.log(`CORS enabled for origins: ${corsOrigin}`);
   } else {
     app.enableCors({
-      origin: true,
-      credentials: true,
+      origin: '*',
+      credentials: false,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
-      exposedHeaders: ['Access-Control-Allow-Origin'],
     });
     console.log('CORS enabled for ALL origins (Development Mode)');
   }
