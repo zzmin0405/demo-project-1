@@ -448,6 +448,23 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
+      socket.on('camera-state-changed', (data: { userId: string, hasVideo: boolean }) => {
+        setParticipants(prev => prev.map(p => {
+          if (p.userId === data.userId) {
+            return { ...p, hasVideo: data.hasVideo };
+          }
+          return p;
+        }));
+
+        // If video is turned off, clean up the media source so it can be re-initialized fresh when turned back on
+        if (!data.hasVideo) {
+          const socketId = userIdToSocketIdMap.current[data.userId];
+          if (socketId) {
+            cleanupMediaSource(socketId);
+          }
+        }
+      });
+
       socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
         const { socketId, chunk } = data;
         console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength}`);
