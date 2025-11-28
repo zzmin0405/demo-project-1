@@ -44,6 +44,10 @@ export async function DELETE(
         const backendUrl = process.env.BACKEND_URL || 'http://localhost:3002';
         const response = await fetch(`${backendUrl}/meetings/${roomId}`, {
             method: 'DELETE',
+            headers: {
+                'ngrok-skip-browser-warning': 'true',
+                'Content-Type': 'application/json',
+            },
         });
 
         if (!response.ok) {
