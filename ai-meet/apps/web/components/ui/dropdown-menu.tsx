@@ -18,24 +18,35 @@ const DropdownMenu = ({ children }: { children: React.ReactNode }) => {
         </div>
     )
 }
-child.props.onClick?.(e);
-setIsOpen?.(!isOpen);
+const DropdownMenuTrigger = React.forwardRef<
+    HTMLButtonElement,
+    React.ButtonHTMLAttributes<HTMLButtonElement> & { asChild?: boolean, isOpen?: boolean, setIsOpen?: (open: boolean) => void }
+>(({ className, children, isOpen, setIsOpen, asChild, ...props }, ref) => {
+    const child = React.Children.only(children) as React.ReactElement;
+
+    if (asChild && React.isValidElement(child)) {
+        return React.cloneElement(child, {
+            // @ts-expect-error - Injected props
+            onClick: (e: React.MouseEvent) => {
+                // @ts-expect-error - Injected props
+                child.props.onClick?.(e);
+                setIsOpen?.(!isOpen);
             },
-// @ts-expect-error - Injected props
-ref
+
+            ref
         });
     }
 
-return (
-    <button
-        ref={ref}
-        onClick={() => setIsOpen?.(!isOpen)}
-        className={cn(className)}
-        {...props}
-    >
-        {children}
-    </button>
-)
+    return (
+        <button
+            ref={ref}
+            onClick={() => setIsOpen?.(!isOpen)}
+            className={cn(className)}
+            {...props}
+        >
+            {children}
+        </button>
+    )
 })
 DropdownMenuTrigger.displayName = "DropdownMenuTrigger"
 
