@@ -394,6 +394,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     isInitialized.current = true;
 
     const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
+    console.log('[ConnectionDebug] Attempting to connect to:', websocketUrl);
+
     const socket = io(websocketUrl, {
       autoConnect: false,
       extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
