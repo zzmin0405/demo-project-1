@@ -8,8 +8,8 @@ import Image from 'next/image';
 import { Button } from "@/components/ui/button";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff,
-  MoreHorizontal, LayoutGrid, Maximize, Pin, PinOff,
-  Users, MessageSquare, Settings, X, Send, ChevronUp, ChevronDown, Edit2, Trash2
+  LayoutGrid, Maximize, Pin, PinOff,
+  Users, MessageSquare, Settings, ChevronUp, ChevronDown, Edit2
 } from 'lucide-react';
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -58,7 +58,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [pinnedUserId, setPinnedUserId] = useState<string | null>(null);
   const [showControls, setShowControls] = useState(true);
   const [showParticipantsPanel, setShowParticipantsPanel] = useState(false);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
 
@@ -350,6 +349,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     initialize();
 
+    const mediaSources = mediaSourcesRef.current;
+
     return () => {
       console.log('Client: useEffect cleanup');
       mediaRecorderRef.current?.stop();
@@ -360,7 +361,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         audioContextRef.current.close();
       }
 
-      Object.keys(mediaSourcesRef.current).forEach(socketId => {
+      Object.keys(mediaSources).forEach(socketId => {
         cleanupMediaSource(socketId);
       });
 
