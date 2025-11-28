@@ -530,52 +530,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           chunkQueueRef.current[socketId].push(blob);
         }
       });
-
-      socket.on('mic-state-changed', (data: { userId: string; isMuted: boolean }) => {
-        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
-      });
-
-      socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
-        setChatMessages(prev => [...prev, data]);
-      });
-
-      socket.on('meeting-title-updated', (data: { title: string }) => {
-        setMeetingTitle(data.title);
-      });
-
-      socket.on('reaction-received', (data: { userId: string; emoji: string }) => {
-        const newReaction: Reaction = {
-          id: Math.random().toString(36).substr(2, 9),
-          emoji: data.emoji,
-          userId: data.userId
-        };
-        setReactions(prev => [...prev, newReaction]);
-        setTimeout(() => {
-          setReactions(prev => prev.filter(r => r.id !== newReaction.id));
-        }, 2000);
-      });
-
-      socket.on('chat-error', (data: { message: string }) => {
-        if (data.message.includes('Room not found') || data.message.includes('Participant not found')) {
-          socket.emit('join-room', {
-            roomId,
-            username,
-            avatar_url: session.user?.image,
-            hasVideo: localVideoOn,
-            isMuted: isMuted
-          });
-        } else {
-          alert(`채팅 전송 실패: ${data.message}`);
-        }
-      });
-
-      socket.on('disconnect', (reason) => {
-        console.log('Client: Disconnected', reason);
-      });
-      socket.on('error', (data: { message: string }) => {
-        alert(data.message);
-        router.push('/');
-      });
     };
 
     initialize();
@@ -592,7 +546,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       setParticipants([]);
       isInitialized.current = false;
     };
-  }, [roomId, router, session, status]); // Removed initializeMediaStream dependency to avoid loop, but it's stable via useCallback
+  }, [roomId, router, session, status]);
 
   const toggleCamera = async () => {
     if (!localStreamRef.current) {
@@ -600,6 +554,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       return;
     }
 
+    const currentUserId = (session?.user as { id?: string })?.id || session?.user?.email;
     const videoTrack = localStreamRef.current.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.enabled = !videoTrack.enabled;
@@ -609,7 +564,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socketRef.current?.emit('camera-state-changed', {
         roomId,
-        userId: session?.user?.email,
+        userId: currentUserId,
         hasVideo: videoTrack.enabled,
       });
     } else {
@@ -637,7 +592,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         socketRef.current?.emit('camera-state-changed', {
           roomId,
-          userId: session?.user?.email,
+          userId: currentUserId,
           hasVideo: true,
         });
       } catch (e) {
@@ -651,6 +606,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const toggleMute = async () => {
     let newMutedState = !isMuted;
+    const currentUserId = (session?.user as { id?: string })?.id || session?.user?.email;
 
     if (!localStreamRef.current) {
       setIsMuted(false);
@@ -677,7 +633,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     socketRef.current?.emit('mic-state-changed', {
       roomId,
-      userId: session?.user?.email,
+      userId: currentUserId,
       isMuted: newMutedState
     });
   };
@@ -690,8 +646,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }, 2000);
   };
 
-
-
   const leaveRoom = () => {
     console.log('Client: Leaving room');
     mediaRecorderRef.current?.stop();
@@ -701,13 +655,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       audioContextRef.current.close();
     }
 
-    // Explicitly notify server before disconnecting and wait for Ack
     if (socketRef.current?.connected) {
       const timeout = setTimeout(() => {
         console.log('Client: Leave Ack timed out, forcing disconnect');
         socketRef.current?.disconnect();
         router.push('/');
-      }, 500); // Wait max 500ms
+      }, 500);
 
       socketRef.current.emit('leave-room', {}, () => {
         console.log('Client: Leave Ack received');
@@ -716,7 +669,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         router.push('/');
       });
     } else {
-      // If already disconnected, just go home
       router.push('/');
     }
   };
@@ -735,14 +687,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     localStorage.setItem('exitImmediately', String(newValue));
   };
 
-  // --- Chat Logic ---
   useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [chatMessages, showChatPanel]);
-
-
 
   const sendMessage = (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -778,17 +727,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const handleSendReaction = (emoji: string) => {
     socketRef.current?.emit('send-reaction', { roomId, emoji });
-    // Optimistically show reaction for self? 
-    // The server broadcasts to everyone including sender, so we can wait for that.
-    // Or we can show it immediately for better responsiveness.
-    // Let's rely on server broadcast for consistency for now.
   };
 
-  // --- Auto-hide Controls Logic ---
-  // --- Auto-hide Controls Logic ---
   const resetControlsTimer = useCallback(() => {
-    // Note: We do NOT force setShowControls(true) here anymore.
-    // This function only resets the hide timer if called.
     if (controlsTimeoutRef.current) {
       clearTimeout(controlsTimeoutRef.current);
     }
@@ -798,14 +739,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   }, []);
 
   useEffect(() => {
-    // Initial timer start
     resetControlsTimer();
     return () => {
       if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     };
   }, [resetControlsTimer]);
-
-  // --- UI Components ---
 
   const ParticipantCard = ({
     participant,
