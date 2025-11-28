@@ -394,8 +394,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     isInitialized.current = true;
 
     const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
-    console.log('[ConnectionDebug] Attempting to connect to:', websocketUrl);
-
     const socket = io(websocketUrl, {
       autoConnect: false,
       extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
@@ -500,13 +498,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
-      socket.on('chat-message', (data: { userId: string, username: string, message: string, timestamp: string, avatar_url?: string }) => {
-        setChatMessages(prev => [...prev, data]);
-        if (!showChatPanel) {
-          // Optional: Add unread count or notification logic here if needed
-        }
-      });
-
       socket.on('media-mime-type', (data: { socketId: string, mimeType: string }) => {
         mimeTypesRef.current[data.socketId] = data.mimeType;
         const userId = socketIdToUserIdMap.current[data.socketId];
@@ -578,7 +569,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const currentUserId = (session?.user as { id?: string })?.id || session?.user?.email;
     const videoTrack = localStreamRef.current.getVideoTracks()[0];
     if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
       videoTrack.enabled = !videoTrack.enabled;
       setLocalVideoOn(videoTrack.enabled);
       localVideoOnRef.current = videoTrack.enabled;
@@ -783,12 +773,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <div className="w-full h-full flex items-center justify-center bg-black/90">
           {isLocal ? (
             <video
-              ref={el => {
-                localVideoRef.current = el;
-                if (el && localStream) {
-                  el.srcObject = localStream;
-                }
-              }}
+              ref={localVideoRef}
               autoPlay
               muted
               playsInline
