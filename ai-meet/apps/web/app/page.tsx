@@ -1,3 +1,11 @@
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import Link from "next/link";
+import { CreateMeetingModal, MeetingSettings } from "@/components/create-meeting-modal";
+import { useLanguage } from "@/contexts/language-context";
 import { Globe } from "lucide-react";
 import {
   DropdownMenu,

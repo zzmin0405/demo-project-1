@@ -13,7 +13,7 @@ export async function POST(
         }
 
         const roomId = params.roomId;
-        const userId = (session.user as any).id;
+        const userId = (session.user as { id?: string }).id;
 
         if (!userId) {
             return NextResponse.json({ error: 'User ID not found' }, { status: 400 });

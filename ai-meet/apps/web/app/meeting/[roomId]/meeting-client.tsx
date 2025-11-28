@@ -7,7 +7,7 @@ import { useSession } from "next-auth/react";
 import Image from 'next/image';
 import { Button } from "@/components/ui/button";
 import {
-  Mic, MicOff, Video, VideoOff, MonitorUp, PhoneOff,
+  Mic, MicOff, Video, VideoOff, PhoneOff,
   MoreHorizontal, LayoutGrid, Maximize, Pin, PinOff,
   Users, MessageSquare, Settings, X, Send, ChevronUp, ChevronDown, Edit2, Trash2
 } from 'lucide-react';
@@ -161,7 +161,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         'ngrok-skip-browser-warning': 'true'
       },
       auth: {
-        token: (session.user as any).id || session.user.email // Use ID if available to match currentUserId
+        token: (session.user as { id?: string }).id || session.user.email // Use ID if available to match currentUserId
       },
     });
     socketRef.current = socket;
@@ -171,7 +171,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const initialize = async () => {
       console.log('Client: Initializing...');
 
-      const currentUserId = (session.user as any).id || session.user?.email || 'unknown';
+      const currentUserId = (session.user as { id?: string }).id || session.user?.email || 'unknown';
       console.log('Client: currentUser set to', currentUserId);
 
       const username = session.user?.name || session.user?.email || 'Anonymous';
