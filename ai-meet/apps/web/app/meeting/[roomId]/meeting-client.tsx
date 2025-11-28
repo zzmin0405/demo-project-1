@@ -136,7 +136,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         mediaRecorder.ondataavailable = (event) => {
           if (event.data && event.data.size > 0) {
             if (socketRef.current && socketRef.current.connected) {
-              // console.log('Sending media chunk:', event.data.size); // Uncomment for verbose logging
+              console.log('Sending media chunk:', event.data.size); // Uncomment for verbose logging
               socketRef.current.emit('media-chunk', event.data);
             } else {
               console.warn('Socket not connected, dropping media chunk');
@@ -450,6 +450,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
         const { socketId, chunk } = data;
+        console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength}`);
         const blob = new Blob([chunk], { type: 'video/webm' });
         const sourceBuffer = sourceBuffersRef.current[socketId];
         const mediaSource = mediaSourcesRef.current[socketId];
@@ -729,7 +730,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             />
           ) : (
             <video
-              ref={el => { if (participant.userId) remoteVideoRefs.current[participant.userId] = el; }}
+              ref={el => {
+                if (participant.userId) {
+                  remoteVideoRefs.current[participant.userId] = el;
+                  if (el) {
+                    const socketId = userIdToSocketIdMap.current[participant.userId];
+                    if (socketId && !mediaSourcesRef.current[socketId]) {
+                      setupMediaSource(participant.userId, socketId, 'video/webm; codecs=vp8,opus');
+                    }
+                  }
+                }
+              }}
               autoPlay
               playsInline
               className={cn("w-full h-full object-contain", participant.hasVideo ? 'block' : 'hidden')}

@@ -369,7 +369,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('media-chunk')
   handleMediaChunk(client: Socket, chunk: Buffer): void {
     const roomId = Array.from(client.rooms).find(r => r !== client.id);
-    // console.log(`Received media chunk from ${client.id} in room ${roomId}, size: ${chunk.length}`); // Debug log
+    console.log(`Received media chunk from ${client.id} in room ${roomId}, size: ${chunk.length}`); // Debug log
 
     if (roomId) {
       client.to(roomId).emit('media-chunk', {
