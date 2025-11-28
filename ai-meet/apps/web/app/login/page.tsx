@@ -1,11 +1,10 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { createPagesBrowserClient } from '@supabase/auth-helpers-nextjs';
+import { signIn } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function LoginPage() {
-  const [supabase] = useState(() => createPagesBrowserClient());
   const [isKakaoBrowser, setIsKakaoBrowser] = useState(false);
 
   useEffect(() => {
@@ -17,9 +16,7 @@ export default function LoginPage() {
   }, []);
 
   const handleGoogleLogin = async () => {
-    await supabase.auth.signInWithOAuth({
-      provider: 'google',
-    });
+    await signIn("google", { callbackUrl: "/" });
   };
 
   if (isKakaoBrowser) {

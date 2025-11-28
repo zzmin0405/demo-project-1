@@ -4,10 +4,20 @@ import { ConfigService } from '@nestjs/config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  app.enableCors(); // Enable CORS for WebSocket and HTTP
-
   const configService = app.get(ConfigService);
-  const port = configService.get<number>('PORT') || 3001;
+  const corsOrigin = configService.get<string>('CORS_ORIGIN');
+
+  if (corsOrigin) {
+    app.enableCors({
+      origin: corsOrigin.split(','),
+      credentials: true,
+    });
+    console.log(`CORS enabled for origins: ${corsOrigin}`);
+  } else {
+    app.enableCors(); // Default (allows all, but credentials might be limited)
+    console.log('CORS enabled for ALL origins (Development Mode)');
+  }
+  const port = configService.get<number>('PORT') || 3002;
   const jwtSecret = configService.get<string>('SUPABASE_JWT_SECRET');
 
   if (!jwtSecret) {

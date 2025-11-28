@@ -1,0 +1,124 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+generator client_api {
+  provider = "prisma-client-js"
+  output   = "../../api/node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?   @db.VarChar(50)
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  lastProfileUpdate DateTime?
+  accounts      Account[]
+  sessions      Session[]
+  
+  // Relations for Graduation Project
+  createdRooms  MeetingRoom[] @relation("CreatedRooms")
+  participations Participant[]
+  chatLogs      ChatLog[]
+}
+
+model MeetingRoom {
+  id          String   @id @default(cuid())
+  title       String   @db.VarChar(100)
+  description String?  @db.VarChar(500)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  creatorId   String
+  creator     User     @relation("CreatedRooms", fields: [creatorId], references: [id])
+  
+  currentMode String   @default("FREE") // FREE, ORDERED
+  isChatSaved Boolean  @default(true)   // Chat persistence setting
+  
+  participants Participant[]
+  chatLogs     ChatLog[]
+  summaries    MeetingSummary[]
+}
+
+model Participant {
+  id            String      @id @default(cuid())
+  userId        String
+  meetingRoomId String
+  joinedAt      DateTime    @default(now())
+  leftAt        DateTime?
+  
+  role          String      @default("PARTICIPANT") // HOST, PARTICIPANT
+  status        String      @default("APPROVED")    // WAITING, APPROVED, REJECTED, KICKED
+  
+  isMuted       Boolean     @default(false)
+  isVideoOff    Boolean     @default(false)
+  handRaisedAt  DateTime?   // If set, the user has raised their hand
+  
+  user          User        @relation(fields: [userId], references: [id])
+  meetingRoom   MeetingRoom @relation(fields: [meetingRoomId], references: [id])
+
+  @@unique([userId, meetingRoomId])
+}
+
+model ChatLog {
+  id            String      @id @default(cuid())
+  content       String      @db.VarChar(1000)
+  createdAt     DateTime    @default(now())
+  userId        String
+  meetingRoomId String
+  
+  user          User        @relation(fields: [userId], references: [id])
+  meetingRoom   MeetingRoom @relation(fields: [meetingRoomId], references: [id])
+}
+
+model MeetingSummary {
+  id            String      @id @default(cuid())
+  content       String      @db.Text
+  createdAt     DateTime    @default(now())
+  meetingRoomId String
+  
+  meetingRoom   MeetingRoom @relation(fields: [meetingRoomId], references: [id])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}

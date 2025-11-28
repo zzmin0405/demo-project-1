@@ -1,29 +1,28 @@
-import { createMiddlewareClient } from '@supabase/auth-helpers-nextjs';
-import { NextResponse } from 'next/server';
-
-import type { NextRequest } from 'next/server';
+import { getToken } from "next-auth/jwt";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 
 export async function middleware(req: NextRequest) {
-  const res = NextResponse.next();
-  const supabase = createMiddlewareClient({ req, res });
+  const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
+  const { pathname } = req.nextUrl;
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  // if user is signed in and the current path is /login, redirect to /meeting
-  if (user && req.nextUrl.pathname === '/login') {
-    return NextResponse.redirect(new URL('/', req.url));
+  // If user is logged in and tries to access /login, redirect to home
+  if (pathname === '/login') {
+    if (token) {
+      return NextResponse.redirect(new URL('/', req.url));
+    }
   }
 
-  // if user is not signed in and the current path is not /login, redirect to /login
-  if (!user && req.nextUrl.pathname !== '/login') {
-    return NextResponse.redirect(new URL('/login', req.url));
+  // Protect /meeting and /mypage routes
+  if (pathname.startsWith('/meeting') || pathname === '/mypage') {
+    if (!token) {
+      return NextResponse.redirect(new URL('/login', req.url));
+    }
   }
 
-  return res;
+  return NextResponse.next();
 }
 
 export const config = {
-  matcher: ['/meeting/:path*', '/login'],
+  matcher: ['/login', '/meeting/:path*', '/mypage'],
 };

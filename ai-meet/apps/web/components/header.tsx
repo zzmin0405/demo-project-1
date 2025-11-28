@@ -1,36 +1,17 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { createPagesBrowserClient } from '@supabase/auth-helpers-nextjs';
+import { useSession, signOut } from "next-auth/react";
 import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import type { User } from '@supabase/supabase-js';
 
 export default function Header() {
   const router = useRouter();
   const pathname = usePathname();
-  const [supabase] = useState(() => createPagesBrowserClient());
-  const [user, setUser] = useState<User | null>(null);
-
-  useEffect(() => {
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      setUser(session?.user ?? null);
-    });
-
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-    });
-
-    return () => {
-      authListener.subscription.unsubscribe();
-    };
-  }, [supabase]);
+  const { data: session } = useSession();
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
-    router.push('/');
+    await signOut({ callbackUrl: '/' });
   };
 
   return (
@@ -40,7 +21,7 @@ export default function Header() {
           AI-Meet
         </Link>
         <div>
-          {user ? (
+          {session?.user ? (
             <div className="flex items-center gap-4">
               <Button asChild variant="ghost">
                 <Link href="/mypage">My Page</Link>
