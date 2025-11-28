@@ -87,6 +87,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const mediaSourcesRef = useRef<{ [socketId: string]: MediaSource }>({});
   const sourceBuffersRef = useRef<{ [socketId: string]: SourceBuffer }>({});
+  const localMimeTypeRef = useRef<string | null>(null);
   const chunkQueueRef = useRef<{ [socketId: string]: Blob[] }>({});
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
@@ -164,7 +165,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       console.log(`setupMediaRecorder: Selected mimeType: ${selectedMimeType}`);
 
       if (socketRef.current) {
-        socketRef.current.emit('media-mime-type', { mimeType: selectedMimeType || 'video/webm; codecs=vp8,opus' });
+        localMimeTypeRef.current = selectedMimeType || 'video/webm; codecs=vp8,opus';
+        socketRef.current.emit('media-mime-type', { mimeType: localMimeTypeRef.current });
       }
 
       try {
@@ -418,7 +420,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('connect', () => {
         const now = Date.now();
-        if (now - lastConnectTimeRef.current < 1000) return;
+        if (now - lastConnectTimeRef.current < 500) return;
         lastConnectTimeRef.current = now;
 
         if (localStreamRef.current) {
@@ -431,6 +433,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           });
           socket.emit('camera-state-changed', { roomId, userId: currentUserId, hasVideo: localVideoOnRef.current });
           socket.emit('mic-state-changed', { roomId, userId: currentUserId, isMuted: isMutedRef.current });
+
+          if (localMimeTypeRef.current) {
+            socket.emit('media-mime-type', { roomId, mimeType: localMimeTypeRef.current });
+          }
 
           if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'inactive') {
             mediaRecorderRef.current.start(300);
@@ -547,6 +553,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       isInitialized.current = false;
     };
   }, [roomId, router, session, status]);
+
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
 
   const toggleCamera = async () => {
     if (!localStreamRef.current) {
@@ -828,7 +840,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             </>
           )}
         </div>
-      </div>
+      </div >
     );
   };
 
