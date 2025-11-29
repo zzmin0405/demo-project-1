@@ -310,6 +310,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
       });
 
+      socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
+        console.log(`[Client] Camera state changed for ${data.userId}: ${data.hasVideo}`);
+        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p));
+      });
+
       socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
         setChatMessages(prev => [...prev, data]);
       });
@@ -469,7 +474,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
     if (socketRef.current && stream) {
       const hasVideo = stream.getVideoTracks().length > 0;
-      const mimeType = hasVideo ? 'video/webm; codecs=vp8,opus' : 'audio/webm; codecs=opus';
+      let mimeType = 'video/webm; codecs=vp8,opus';
+
+      if (hasVideo) {
+        const possibleTypes = [
+          'video/webm; codecs=vp8,opus',
+          'video/webm; codecs=vp9,opus',
+          'video/webm; codecs=h264,opus',
+          'video/mp4; codecs=h264,aac',
+        ];
+        for (const type of possibleTypes) {
+          if (MediaRecorder.isTypeSupported(type)) {
+            mimeType = type;
+            break;
+          }
+        }
+      } else {
+        mimeType = 'audio/webm; codecs=opus';
+      }
+
       console.log(`Client: Setting up MediaRecorder with mimeType: ${mimeType}`);
 
       const options = { mimeType };
