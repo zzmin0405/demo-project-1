@@ -736,7 +736,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       userId: session?.user?.email,
       hasVideo: videoTrack.enabled,
     });
-    console.log(`[toggleCamera] Emitted camera-state-changed: ${videoTrack.enabled}`);
+    console.log(`[toggleCamera] Emitted camera-state-changed: ${videoTrack.enabled}. localVideoOn state should update to: ${videoTrack.enabled}`);
   };
 
   const toggleMute = () => {
