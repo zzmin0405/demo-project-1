@@ -37,11 +37,10 @@ export async function DELETE(
         }
 
         // Call NestJS API to force delete and kick users
-        const backendUrl = process.env.BACKEND_URL || 'https://saprophytically-unhashed-freda.ngrok-free.dev';
+        const backendUrl = process.env.BACKEND_URL || 'https://athletics-blackberry-hygiene-excluded.trycloudflare.com';
         const response = await fetch(`${backendUrl}/meetings/${roomId}`, {
             method: 'DELETE',
             headers: {
-                'ngrok-skip-browser-warning': 'true',
                 'Content-Type': 'application/json',
             },
         });
@@ -57,7 +56,7 @@ export async function DELETE(
         console.error('Error deleting meeting:', error);
         return NextResponse.json({
             error: `Internal Error: ${error instanceof Error ? error.message : String(error)}`,
-            backendUrl: process.env.BACKEND_URL || 'https://saprophytically-unhashed-freda.ngrok-free.dev'
+            backendUrl: process.env.BACKEND_URL || 'https://athletics-blackberry-hygiene-excluded.trycloudflare.com'
         }, { status: 500 });
     }
 }

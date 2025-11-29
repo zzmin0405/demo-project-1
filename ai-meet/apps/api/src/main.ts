@@ -7,6 +7,12 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const corsOrigin = configService.get<string>('CORS_ORIGIN');
 
+  // Debugging Middleware: Log all incoming requests
+  app.use((req, res, next) => {
+    console.log(`[Request] ${req.method} ${req.url} | Origin: ${req.headers.origin} | ngrok-header: ${req.headers['ngrok-skip-browser-warning']}`);
+    next();
+  });
+
   if (corsOrigin) {
     app.enableCors({
       origin: '*',
@@ -17,10 +23,10 @@ async function bootstrap() {
     console.log(`CORS enabled for origins: ${corsOrigin}`);
   } else {
     app.enableCors({
-      origin: '*',
-      credentials: false,
+      origin: true,
+      credentials: true,
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
     });
     console.log('CORS enabled for ALL origins (Development Mode)');
   }

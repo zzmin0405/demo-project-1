@@ -21,9 +21,9 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: true, // Allow all origins dynamically (equivalent to * but supports credentials)
+    origin: true,
     methods: ["GET", "POST"],
-    allowedHeaders: ['ngrok-skip-browser-warning', 'authorization', 'content-type'],
+    allowedHeaders: ['authorization', 'content-type'],
     credentials: true,
   },
 })

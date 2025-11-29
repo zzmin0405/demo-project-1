@@ -153,21 +153,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
     isInitialized.current = true;
 
-    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
+    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'https://athletics-blackberry-hygiene-excluded.trycloudflare.com';
     console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
-      transports: ["polling", "websocket"], // Force polling to ensure headers are sent
-      transportOptions: {
-        polling: {
-          extraHeaders: {
-            "ngrok-skip-browser-warning": "true",
-          },
-        },
-      },
-      extraHeaders: {
-        'ngrok-skip-browser-warning': 'true'
-      },
+      transports: ["websocket", "polling"],
       auth: {
         token: (session.user as any).id || session.user.email // Use ID if available to match currentUserId
       },
