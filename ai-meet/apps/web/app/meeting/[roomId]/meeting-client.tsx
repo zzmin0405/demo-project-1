@@ -202,6 +202,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       try {
         if (MediaSource.isTypeSupported(mimeType)) {
           const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+          sourceBuffer.mode = 'sequence'; // Use sequence mode to handle timestamp resets automatically
           sourceBuffersRef.current[socketId] = sourceBuffer;
 
           sourceBuffer.addEventListener('updateend', () => {
