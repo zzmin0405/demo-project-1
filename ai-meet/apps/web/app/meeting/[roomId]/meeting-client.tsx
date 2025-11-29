@@ -157,6 +157,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
+      transports: ["polling", "websocket"], // Force polling to ensure headers are sent
+      transportOptions: {
+        polling: {
+          extraHeaders: {
+            "ngrok-skip-browser-warning": "true",
+          },
+        },
+      },
       extraHeaders: {
         'ngrok-skip-browser-warning': 'true'
       },

@@ -21,9 +21,10 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: '*', // For development only. Restrict this in production.
+    origin: true, // Allow all origins dynamically (equivalent to * but supports credentials)
+    methods: ["GET", "POST"],
     allowedHeaders: ['ngrok-skip-browser-warning', 'authorization', 'content-type'],
-    credentials: false,
+    credentials: true,
   },
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
