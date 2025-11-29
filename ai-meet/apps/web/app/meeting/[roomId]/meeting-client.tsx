@@ -383,12 +383,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           isMuted: isMutedRef.current
         });
 
-        // Restart MediaRecorder on reconnection to ensure Init Segment is sent
-        if (localStreamRef.current && mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-          console.log('Restarting MediaRecorder on reconnection...');
-          mediaRecorderRef.current.stop();
-          setupMediaRecorder(localStreamRef.current);
-        }
+        // Request Init Segments from server (Server-Side Caching)
+        console.log('Requesting Init Segments from server...');
+        socket.emit('request-init-segment', { roomId });
 
         let initialVideoOn = false;
         let initialMuted = true;
@@ -432,20 +429,21 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           });
           socketIdToUserIdMap.current[data.socketId] = data.userId;
           userIdToSocketIdMap.current[data.userId] = data.socketId;
-
-          // Restart MediaRecorder to send Init Segment to the new user
-          if (localStreamRef.current && mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-            console.log('Restarting MediaRecorder for new user...');
-            mediaRecorderRef.current.stop();
-            // setupMediaRecorder will be called by the stop event or we can call it directly if we modify setupMediaRecorder to not be recursive or just call it here.
-            // Actually, setupMediaRecorder handles stop/start.
-            setupMediaRecorder(localStreamRef.current);
-          }
         }
       });
 
-      socket.on('user-left', (data: { userId: string }) => {
+      socket.on('user-left', (data: { userId: string, socketId?: string }) => {
         console.log('User left:', data);
+
+        // Race Condition Guard:
+        // If the user reconnected quickly, userIdToSocketIdMap might already point to the NEW socketId.
+        // If we receive 'user-left' for the OLD socketId, we must NOT cleanup the new session.
+        const currentSocketId = userIdToSocketIdMap.current[data.userId];
+        if (data.socketId && currentSocketId && data.socketId !== currentSocketId) {
+          console.log(`[RaceGuard] Ignoring user-left for old socket ${data.socketId} (Current: ${currentSocketId})`);
+          return;
+        }
+
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
         const socketId = userIdToSocketIdMap.current[data.userId];
         if (socketId) {

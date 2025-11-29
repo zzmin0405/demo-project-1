@@ -37,6 +37,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private roomToUsers = new Map<string, Map<string, Participant>>(); // roomId -> Map<socketId, Participant>
   private userIdToRoom = new Map<string, string>(); // userId -> roomId
 
+  // Init Segment Cache: socketId -> { chunk: Buffer, mimeType: string, timestamp: number }
+  private initSegments = new Map<string, { chunk: Buffer, mimeType: string, timestamp: number }>();
+
   handleConnection(client: Socket, ...args: any[]) {
     console.log(`Client connecting: ${client.id}`);
   }
@@ -132,7 +135,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             this.userIdToRoom.delete(leavingUser.userId);
           }
 
-          this.server.to(roomId).emit('user-left', { userId: leavingUser.userId });
+          this.server.to(roomId).emit('user-left', { userId: leavingUser.userId, socketId: client.id });
           console.log(`Client ${leavingUser.userId} left room ${roomId}`);
 
           // DB Sync: Update leftAt
@@ -150,6 +153,12 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         } else {
           console.log(`Client ${leavingUser.userId} socket ${client.id} disconnected, but user remains in room (refresh/ghost).`);
         }
+
+        // Cleanup Init Segment
+        if (this.initSegments.has(client.id)) {
+          this.initSegments.delete(client.id);
+        }
+
         return;
       }
     }
@@ -289,6 +298,24 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.to(roomId).emit('user-joined', { userId, username, hasVideo, isMuted, avatar_url, socketId: client.id });
 
     console.log(`Client ${userId} (${username}) joined room ${roomId}.`);
+
+    // 4. Send Cached Init Segments to the new user
+    const socketsInRoom = await this.server.in(roomId).fetchSockets();
+    for (const socket of socketsInRoom) {
+      if (socket.id !== client.id && this.initSegments.has(socket.id)) {
+        const cached = this.initSegments.get(socket.id);
+        if (cached) {
+          console.log(`Sending cached Init Segment from ${socket.id} to ${client.id}`);
+
+          client.emit('media-chunk', {
+            socketId: socket.id,
+            chunk: cached.chunk,
+            isInit: true,
+            mimeType: cached.mimeType,
+          });
+        }
+      }
+    }
   }
 
   @SubscribeMessage('leave-room')
@@ -355,7 +382,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
           this.userIdToRoom.delete(userId);
 
           // Notify others
-          this.server.to(roomId).emit('user-left', { userId });
+          this.server.to(roomId).emit('user-left', { userId, socketId: socketIdToRemove });
 
           // DB Update
           await this.prisma.participant.updateMany({
@@ -372,6 +399,16 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // console.log(`Received media chunk from ${client.id} in room ${roomId}, size: ${payload.chunk.length}, isInit: ${payload.isInit}`); // Verbose logging
 
     if (roomId) {
+      // Cache Init Segment
+      if (payload.isInit && payload.mimeType) {
+        console.log(`Caching Init Segment for ${client.id} (${payload.chunk.length} bytes, ${payload.mimeType})`);
+        this.initSegments.set(client.id, {
+          chunk: payload.chunk,
+          mimeType: payload.mimeType,
+          timestamp: Date.now()
+        });
+      }
+
       client.to(roomId).emit('media-chunk', {
         socketId: client.id,
         chunk: payload.chunk,
@@ -381,7 +418,28 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  @SubscribeMessage('request-init-segment')
+  async handleRequestInitSegment(client: Socket, data: { roomId: string }): Promise<void> {
+    const { roomId } = data;
+    console.log(`Client ${client.id} requested Init Segments for room ${roomId}`);
 
+    const socketsInRoom = await this.server.in(roomId).fetchSockets();
+    for (const socket of socketsInRoom) {
+      if (socket.id !== client.id && this.initSegments.has(socket.id)) {
+        const cached = this.initSegments.get(socket.id);
+        if (cached) {
+          console.log(`Re-sending Init Segment from ${socket.id} to ${client.id}`);
+
+          client.emit('media-chunk', {
+            socketId: socket.id,
+            chunk: cached.chunk,
+            isInit: true,
+            mimeType: cached.mimeType,
+          });
+        }
+      }
+    }
+  }
 
   // WebRTC Signaling Handlers
   @SubscribeMessage('offer')
@@ -406,6 +464,12 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('camera-state-changed')
   handleCameraStateChanged(client: Socket, data: { roomId: string; userId: string; hasVideo: boolean }): void {
+    // Clear cache if video is turned off
+    if (!data.hasVideo) {
+      console.log(`Camera off for ${client.id}, clearing Init Segment`);
+      this.initSegments.delete(client.id);
+    }
+
     // Broadcast the camera state change to other users in the room
     client.to(data.roomId).emit('camera-state-changed', {
       userId: data.userId,
