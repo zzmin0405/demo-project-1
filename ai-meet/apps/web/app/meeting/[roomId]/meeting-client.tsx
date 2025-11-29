@@ -461,13 +461,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   // Also use useEffect to update when localStream changes
   useEffect(() => {
-    console.log('[useEffect srcObject] Triggered. localStream:', !!localStream, 'localVideoRef.current:', !!localVideoRef.current);
+    console.log('[useEffect srcObject] Triggered. localStream:', !!localStream, 'localVideoRef.current:', !!localVideoRef.current, 'localVideoOn:', localVideoOn);
     if (localStream && localVideoRef.current) {
       console.log('[useEffect srcObject] Setting srcObject...');
       localVideoRef.current.srcObject = localStream;
       console.log('[useEffect srcObject] srcObject set successfully');
     }
-  }, [localStream]);
+  }, [localStream, localVideoOn]);
 
   const setupMediaRecorder = (stream: MediaStream) => {
     if (mediaRecorderRef.current) {

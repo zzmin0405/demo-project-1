@@ -37,14 +37,27 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
     setLocalVideoRef,
     onRemoteVideoRef
 }) => {
-    // console.log(`[ParticipantCard] Render ${participant.userId} isLocal=${isLocal} localVideoOn=${localVideoOn} hasVideo=${participant.hasVideo}`);
+    console.log(`[ParticipantCard] Render ${participant.userId} isLocal=${isLocal} localVideoOn=${localVideoOn} hasVideo=${participant.hasVideo}`);
+
+    const videoRef = useRef<HTMLVideoElement>(null);
+
+    useEffect(() => {
+        if (isLocal && videoRef.current) {
+            console.log(`[ParticipantCard] Local Video Ref State: srcObject=${!!videoRef.current.srcObject}, paused=${videoRef.current.paused}, readyState=${videoRef.current.readyState}, style.display=${videoRef.current.style.display}`);
+        }
+    });
+
     return (
         <div className={cn("relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all", className)}>
             {/* Video / Avatar Area */}
             <div className="w-full h-full flex items-center justify-center bg-black/90">
                 {isLocal ? (
                     <video
-                        ref={setLocalVideoRef}
+                        ref={(el) => {
+                            // Combine refs
+                            if (setLocalVideoRef) setLocalVideoRef(el);
+                            (videoRef as any).current = el;
+                        }}
                         autoPlay
                         muted
                         playsInline
