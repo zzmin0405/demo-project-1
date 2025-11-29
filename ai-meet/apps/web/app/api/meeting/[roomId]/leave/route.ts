@@ -13,13 +13,8 @@ export async function POST(
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-<<<<<<< HEAD
-
-        const userId = (session.user as { id?: string }).id;
-=======
         const { roomId } = await params;
         const userId = (session.user as any).id;
->>>>>>> feature/websocket-streaming
 
         if (!userId) {
             return NextResponse.json({ error: 'User ID not found' }, { status: 400 });
