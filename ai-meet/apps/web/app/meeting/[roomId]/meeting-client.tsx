@@ -409,6 +409,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           });
           socketIdToUserIdMap.current[data.socketId] = data.userId;
           userIdToSocketIdMap.current[data.userId] = data.socketId;
+
+          // Restart MediaRecorder to send Init Segment to the new user
+          if (localStreamRef.current && mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+            console.log('Restarting MediaRecorder for new user...');
+            mediaRecorderRef.current.stop();
+            // setupMediaRecorder will be called by the stop event or we can call it directly if we modify setupMediaRecorder to not be recursive or just call it here.
+            // Actually, setupMediaRecorder handles stop/start.
+            setupMediaRecorder(localStreamRef.current);
+          }
         }
       });
 
