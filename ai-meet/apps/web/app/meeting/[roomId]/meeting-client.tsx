@@ -379,8 +379,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           roomId,
           username: session.user?.name || 'Anonymous',
           avatar_url: session.user?.image,
-          hasVideo: false,
-          isMuted: true
+          hasVideo: localVideoOnRef.current,
+          isMuted: isMutedRef.current
         });
 
         // Restart MediaRecorder on reconnection to ensure Init Segment is sent
