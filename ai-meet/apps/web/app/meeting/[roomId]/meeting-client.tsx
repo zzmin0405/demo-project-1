@@ -271,41 +271,45 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         const blob = new Blob([chunk], { type: mimeType });
 
         if (!mediaSourcesRef.current[socketId]) {
-          const userId = socketIdToUserIdMap.current[socketId];
-          if (userId) {
-            setupMediaSource(userId, socketId, mimeType);
-          }
-        }
+          let userId = socketIdToUserIdMap.current[socketId];
 
-        const sourceBuffer = sourceBuffersRef.current[socketId];
-        const mediaSource = mediaSourcesRef.current[socketId];
-
-        // Always queue if sourceBuffer doesn't exist yet
-        if (!sourceBuffer) {
-          if (!chunkQueueRef.current[socketId]) {
-            chunkQueueRef.current[socketId] = [];
-          }
-          chunkQueueRef.current[socketId].push(blob);
-          return;
-        }
-
-        if (!sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
-          try {
-            sourceBuffer.appendBuffer(await blob.arrayBuffer());
-          } catch (e) {
-            if (e instanceof DOMException && e.name === 'InvalidStateError') {
-              console.warn(`Ignored InvalidStateError for ${socketId} (likely cleanup race condition)`);
-            } else {
-              console.error(`Error appending buffer for ${socketId}`, e);
+          // Fallback: Try to find user in participants state if map is missing entry
+          if (!userId) {
+            const p = participants.find((p: any) => p.socketId === socketId);
+            if (p) {
+              console.log(`[MediaChunk] Recovered userId ${p.userId} from participants state for socket ${socketId}`);
+              userId = p.userId;
+              socketIdToUserIdMap.current[socketId] = userId;
+              userIdToSocketIdMap.current[userId] = socketId;
             }
           }
-        } else {
-          if (!chunkQueueRef.current[socketId]) {
-            chunkQueueRef.current[socketId] = [];
+
+          // Always queue if sourceBuffer doesn't exist yet
+          if (!sourceBuffer) {
+            if (!chunkQueueRef.current[socketId]) {
+              chunkQueueRef.current[socketId] = [];
+            }
+            chunkQueueRef.current[socketId].push(blob);
+            return;
           }
-          chunkQueueRef.current[socketId].push(blob);
-        }
-      });
+
+          if (!sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
+            try {
+              sourceBuffer.appendBuffer(await blob.arrayBuffer());
+            } catch (e) {
+              if (e instanceof DOMException && e.name === 'InvalidStateError') {
+                console.warn(`Ignored InvalidStateError for ${socketId} (likely cleanup race condition)`);
+              } else {
+                console.error(`Error appending buffer for ${socketId}`, e);
+              }
+            }
+          } else {
+            if (!chunkQueueRef.current[socketId]) {
+              chunkQueueRef.current[socketId] = [];
+            }
+            chunkQueueRef.current[socketId].push(blob);
+          }
+        });
 
       socket.on('mic-state-changed', (data: { userId: string; isMuted: boolean }) => {
         setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
