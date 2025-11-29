@@ -367,6 +367,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           isMuted: true
         });
 
+        // Restart MediaRecorder on reconnection to ensure Init Segment is sent
+        if (localStreamRef.current && mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          console.log('Restarting MediaRecorder on reconnection...');
+          mediaRecorderRef.current.stop();
+          setupMediaRecorder(localStreamRef.current);
+        }
+
         let initialVideoOn = false;
         let initialMuted = true;
 
