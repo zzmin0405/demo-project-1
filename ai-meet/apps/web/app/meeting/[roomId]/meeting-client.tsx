@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { ChatPanel } from "@/components/meeting/chat-panel";
+import { ParticipantCard } from "@/components/meeting/participant-card";
 import { ReactionBar } from "@/components/meeting/reaction-bar";
 import { ReactionOverlay, Reaction } from "@/components/meeting/reaction-overlay";
 
@@ -864,105 +865,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   // --- UI Components ---
 
-  const ParticipantCard = ({
-    participant,
-    isLocal = false,
-    isPinned = false,
-    className = ""
-  }: {
-    participant: Participant | { userId: string, username: string, hasVideo: boolean, isMuted?: boolean, avatar_url?: string },
-    isLocal?: boolean,
-    isPinned?: boolean,
-    className?: string
-  }) => {
-    return (
-      <div className={cn("relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all", className)}>
-        {/* Video / Avatar Area */}
-        <div className="w-full h-full flex items-center justify-center bg-black/90">
-          {isLocal ? (
-            <video
-              ref={setLocalVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className={cn("w-full h-full object-contain", (localVideoOn && localStream) ? 'block' : 'hidden')}
-            />
-          ) : (
-            <video
-              ref={el => { if (participant.userId) remoteVideoRefs.current[participant.userId] = el; }}
-              autoPlay
-              playsInline
-              className={cn("w-full h-full object-contain", participant.hasVideo ? 'block' : 'hidden')}
-            />
-          )}
-
-          {/* Fallback Avatar */}
-          {((isLocal && (!localVideoOn || !localStream)) || (!isLocal && !participant.hasVideo)) && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              {participant.avatar_url ? (
-                <Image src={participant.avatar_url} alt={participant.username} width={120} height={120} className="rounded-full object-cover border-4 border-background/20" />
-              ) : (
-                <div className="w-24 h-24 md:w-32 md:h-32 rounded-full bg-primary/20 flex items-center justify-center text-4xl font-bold text-primary">
-                  {participant.username?.[0]?.toUpperCase()}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Name Tag & Status Icons */}
-        <div className="absolute bottom-2 left-2 bg-black/60 px-2 py-1 rounded text-xs md:text-sm text-white font-medium backdrop-blur-sm flex items-center gap-2">
-          <span>
-            {participant.username} {isLocal && "(You)"}
-            {/* Host Badge - We need to know if this participant is the host. 
-                We don't have isHost prop on participant object directly here unless we pass it or check ID.
-                Let's assume we can check against a hostId state if available, or if the participant object has a role.
-                For now, we'll check if participant.userId matches the known hostId (which we need to store in state).
-            */}
-            {/* Since we don't have hostId in this scope easily without prop drilling or context, 
-                let's assume the parent passes a way to know, or we rely on the fact that we set isHost state for local user.
-                But for remote users? We need to know who the host is. 
-                Let's add `hostId` to the component state and pass it down or check it here.
-                Actually, `meeting-client` has `isHost` state, but that's only for the local user.
-                We need to know the hostId to label others.
-                Let's update the component to accept `isHostUser` prop.
-            */}
-            {/* Temporary fix: We will update the ParticipantCard usage to pass isHostUser */}
-          </span>
-          {/* Mute Status Icon */}
-          {(isLocal ? isMuted : participant.isMuted) ? (
-            <MicOff className="w-3 h-3 text-red-400" />
-          ) : (
-            <Mic className="w-3 h-3 text-green-400" />
-          )}
-        </div>
-
-        {/* Hover Controls Overlay */}
-        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 backdrop-blur-[1px]">
-          {!isLocal && (
-            <>
-              <Button
-                size="icon"
-                variant={isPinned ? "default" : "secondary"}
-                className="rounded-full w-10 h-10"
-                onClick={() => setPinnedUserId(isPinned ? null : participant.userId)}
-                title={isPinned ? "Unpin" : "Pin"}
-              >
-                {isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
-              </Button>
-              {/* Host controls placeholders */}
-              <Button size="icon" variant="destructive" className="rounded-full w-10 h-10" title="Mute (Host only)">
-                <MicOff className="w-4 h-4" />
-              </Button>
-              <Button size="icon" variant="destructive" className="rounded-full w-10 h-10" title="Kick (Host only)">
-                <PhoneOff className="w-4 h-4" />
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-    );
-  };
+  // --- Render Logic ---
 
   // --- Render Logic ---
 
@@ -1092,12 +995,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               <ParticipantCard
                 participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
                 isLocal={true}
+                localVideoOn={localVideoOn}
+                localStream={localStream}
+                isMuted={isMuted}
+                setLocalVideoRef={setLocalVideoRef}
               />
               {participants.map(p => (
                 <ParticipantCard
                   key={p.userId}
                   participant={p}
                   isPinned={p.userId === pinnedUserId}
+                  onPin={(userId) => setPinnedUserId(isPinned ? null : userId)}
+                  onRemoteVideoRef={(userId, el) => { if (userId) remoteVideoRefs.current[userId] = el; }}
                 />
               ))}
             </div>
