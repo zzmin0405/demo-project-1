@@ -266,6 +266,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
         const { socketId, chunk, mimeType = 'video/webm; codecs="vp8, opus"' } = data;
+        // console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength || chunk.length}`); // Uncomment for verbose debugging
         const blob = new Blob([chunk], { type: mimeType });
 
         if (!mediaSourcesRef.current[socketId]) {
@@ -533,6 +534,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             }
           }
         });
+
+        // Trigger initial queue processing
+        if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+          const nextChunk = chunkQueueRef.current[socketId].shift();
+          if (nextChunk) {
+            try {
+              sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+            } catch (e) {
+              console.error(`Error appending initial queued buffer for ${socketId}`, e);
+            }
+          }
+        }
       } catch (e) {
         console.error('Error adding source buffer:', e);
       }
