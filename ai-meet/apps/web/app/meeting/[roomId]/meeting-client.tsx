@@ -159,12 +159,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       if (chunk) {
         try {
           const buffer = await chunk.arrayBuffer();
-          // Double check before appending
-          if (mediaSource.readyState === 'open' && !sourceBuffer.updating) {
-            sourceBuffer.appendBuffer(buffer);
+          // Double check: ensure sourceBuffer is still valid and part of the mediaSource
+          const currentSourceBuffer = sourceBuffersRef.current[socketId];
+          const currentMediaSource = mediaSourcesRef.current[socketId];
+
+          if (currentSourceBuffer === sourceBuffer &&
+            currentMediaSource === mediaSource &&
+            mediaSource.readyState === 'open' &&
+            !sourceBuffer.updating) {
+            try {
+              sourceBuffer.appendBuffer(buffer);
+            } catch (appendError) {
+              console.error('Error appending buffer (inner):', appendError);
+            }
           }
         } catch (e) {
-          console.error('Error appending buffer:', e);
+          console.error('Error processing chunk:', e);
         }
       }
     }
@@ -461,7 +471,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     return () => {
       mediaRecorderRef.current?.stop();
       localStreamRef.current?.getTracks().forEach(track => track.stop());
-      if (audioContextRef.current) audioContextRef.current.close();
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close().catch(e => console.error("Error closing AudioContext:", e));
+      }
       Object.keys(mediaSourcesRef.current).forEach(socketId => cleanupMediaSource(socketId));
       socket.emit('leave-room');
       socket.disconnect();
