@@ -161,7 +161,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         'ngrok-skip-browser-warning': 'true'
       },
       auth: {
-        token: (session.user as any).id || session.user.email // Use ID if available to match currentUserId
+        token: (session.user as { id: string }).id || session.user.email // Use ID if available to match currentUserId
       },
     });
     socketRef.current = socket;
@@ -171,7 +171,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const initialize = async () => {
       console.log('Client: Initializing...');
 
-      const currentUserId = (session.user as any).id || session.user?.email || 'unknown';
+      const currentUserId = (session.user as { id: string }).id || session.user?.email || 'unknown';
       console.log('Client: currentUser set to', currentUserId);
 
       const username = session.user?.name || session.user?.email || 'Anonymous';
@@ -266,7 +266,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer, mimeType?: string }) => {
         const { socketId, chunk, mimeType = 'video/webm; codecs="vp8, opus"' } = data;
         const blob = new Blob([chunk], { type: mimeType });
 
@@ -628,7 +628,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       }
 
       // --- Audio Processing for Volume Control ---
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioContext = new AudioContextClass();
       const source = audioContext.createMediaStreamSource(stream);
       const gainNode = audioContext.createGain();
@@ -716,7 +716,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     socketRef.current?.emit('camera-state-changed', {
       roomId,
-      userId: (session?.user as any)?.id || session?.user?.email,
+      userId: (session?.user as { id: string })?.id || session?.user?.email,
       hasVideo: videoTrack.enabled,
     });
     console.log(`[toggleCamera] Emitted camera-state-changed: ${videoTrack.enabled}`);
@@ -734,7 +734,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     socketRef.current?.emit('mic-state-changed', {
       roomId,
-      userId: (session?.user as any)?.id || session?.user?.email,
+      userId: (session?.user as { id: string })?.id || session?.user?.email,
       isMuted: newMutedState
     });
   };
@@ -1100,7 +1100,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         {showChatPanel && (
           <ChatPanel
             messages={chatMessages}
-            currentUserId={(session?.user as any)?.id || session?.user?.email}
+            currentUserId={(session?.user as { id: string })?.id || session?.user?.email}
             newMessage={newMessage}
             onNewMessageChange={setNewMessage}
             onSendMessage={sendMessage}

@@ -200,9 +200,9 @@ export default function MyPage() {
 
                           const data = await res.json();
                           setImage(data.url);
-                        } catch (error: any) {
+                        } catch (error) {
                           console.error('Upload error:', error);
-                          alert(`업로드 실패: ${error.message}`);
+                          alert(`업로드 실패: ${(error as Error).message}`);
                         } finally {
                           setIsSaving(false);
                         }

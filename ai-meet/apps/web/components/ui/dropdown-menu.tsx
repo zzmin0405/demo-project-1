@@ -10,7 +10,7 @@ const DropdownMenu = ({ children }: { children: React.ReactNode }) => {
         <div className="relative inline-block text-left" onMouseLeave={() => setIsOpen(false)}>
             {React.Children.map(children, child => {
                 if (React.isValidElement(child)) {
-                    // @ts-ignore
+                    // @ts-expect-error: React.cloneElement type mismatch
                     return React.cloneElement(child, { isOpen, setIsOpen });
                 }
                 return child;
@@ -28,13 +28,12 @@ const DropdownMenuTrigger = React.forwardRef<
 
     if (asChild && React.isValidElement(child)) {
         return React.cloneElement(child, {
-            // @ts-ignore
+            // @ts-expect-error: React.cloneElement type mismatch
             onClick: (e: React.MouseEvent) => {
-                // @ts-ignore
+                // @ts-expect-error: React.cloneElement type mismatch
                 child.props.onClick?.(e);
                 setIsOpen?.(!isOpen);
             },
-            // @ts-ignore
             ref
         });
     }
