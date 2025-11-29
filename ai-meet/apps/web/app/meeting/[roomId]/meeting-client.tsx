@@ -120,72 +120,31 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, [roomId]);
 
-  useEffect(() => {
-    if (chatScrollRef.current) {
-      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-    }
-  }, [chatMessages, showChatPanel]);
-
-  const normalizeMimeType = (mimeType: string) => {
-    // Ensure codecs are quoted if present
-    // e.g. video/webm; codecs=vp8,opus -> video/webm; codecs="vp8, opus"
-    if (!mimeType) return 'video/webm; codecs="vp8, opus"';
-    if (mimeType.includes('codecs=') && !mimeType.includes('"')) {
-      const [base, codecs] = mimeType.split('codecs=');
-      return `${base}codecs="${codecs.trim().replace(',', ', ')}"`;
-    }
-    return mimeType;
-  };
-
   const setupMediaRecorder = (stream: MediaStream) => {
     if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.ondataavailable = null; // Prevent old recorder from firing
       mediaRecorderRef.current.stop();
     }
-    initSegmentRef.current = null; // Reset Init Segment for new stream
-    if (socketRef.current && stream) {
-      // Let browser choose the best mimeType, but prefer video/webm if possible
-      // const options = { mimeType: 'video/webm; codecs=vp8,opus' }; 
-      // We will try without options first to see if it fixes the 43-byte header issue.
-      // Or we can try a simpler one.
 
-      try {
-        const mediaRecorder = new MediaRecorder(stream); // Let browser decide
+    try {
+      const options = { mimeType: 'video/webm; codecs=vp8,opus' };
+      const mediaRecorder = new MediaRecorder(stream, options);
 
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0 && socketRef.current?.connected) {
+          socketRef.current.emit('media-chunk', {
+            chunk: event.data,
+            socketId: socketRef.current.id
+          });
+        }
+      };
 
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data && event.data.size > 0) {
-            if (socketRef.current && socketRef.current.connected) {
-              // Capture Init Segment (first chunk)
-              let isInit = false;
-              if (!initSegmentRef.current) {
-                initSegmentRef.current = event.data;
-                isInit = true;
-                console.log('Captured Init Segment, size:', event.data.size);
-              }
+      mediaRecorder.onstart = () => console.log('MediaRecorder started');
+      mediaRecorder.onerror = (e) => console.error('MediaRecorder error:', e);
 
-              console.log(`Sending media chunk: ${event.data.size}, isInit: ${isInit}, mimeType: ${mediaRecorder.mimeType}`);
-              socketRef.current.emit('media-chunk', {
-                chunk: event.data,
-                isInit: isInit,
-                mimeType: isInit ? mediaRecorder.mimeType : undefined
-              });
-            } else {
-              console.warn('Socket not connected, dropping media chunk');
-            }
-          }
-        };
-
-        mediaRecorder.onstart = () => console.log('MediaRecorder started');
-        mediaRecorder.onstop = () => console.log('MediaRecorder stopped');
-        mediaRecorder.onerror = (e) => console.error('MediaRecorder error:', e);
-
-        mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(1000); // Send chunks every 1s to ensure larger Init Segment
-        console.log('MediaRecorder initialized. Detected mimeType:', mediaRecorder.mimeType);
-      } catch (e) {
-        console.error('MediaRecorder setup failed:', e);
-      }
+      mediaRecorderRef.current = mediaRecorder;
+      mediaRecorder.start(100);
+    } catch (e) {
+      console.error('MediaRecorder setup failed:', e);
     }
   };
 
@@ -206,66 +165,34 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
-  const setupSourceBufferListeners = (sourceBuffer: SourceBuffer, socketId: string, mediaSource: MediaSource) => {
-    sourceBuffer.addEventListener('updateend', () => {
-      processChunkQueue(socketId);
-    });
-    sourceBuffer.addEventListener('error', () => {
-      console.error(`SourceBuffer error for ${socketId}`);
-    });
-  };
+  const setupMediaSource = (userId: string, socketId: string) => {
+    if (mediaSourcesRef.current[socketId]) return;
 
-  const setupMediaSource = (userId: string, socketId: string, mimeType: string) => {
-    if (mediaSourcesRef.current[socketId] || !remoteVideoRefs.current[userId]) {
-      return;
-    }
-    const normalizedMime = normalizeMimeType(mimeType);
-    console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId}, rawMime: ${mimeType}, normalized: ${normalizedMime}`);
-
+    console.log(`Setting up MediaSource for ${userId}`);
     const mediaSource = new MediaSource();
     mediaSourcesRef.current[socketId] = mediaSource;
-    const videoElement = remoteVideoRefs.current[userId];
 
+    const videoElement = remoteVideoRefs.current[userId];
     if (videoElement) {
       videoElement.src = URL.createObjectURL(mediaSource);
-      videoElement.muted = false;
-      videoElement.autoplay = true;
-      videoElement.playsInline = true;
-
-      videoElement.onerror = () => console.error(`Video Error for ${userId}:`, videoElement.error);
-      videoElement.onwaiting = () => console.log(`Video Waiting for ${userId}`);
-      videoElement.onplaying = () => console.log(`Video Playing for ${userId}`);
-
-      videoElement.onloadedmetadata = () => {
-        console.log(`Video Metadata Loaded for ${userId}`);
-        videoElement.play().catch(e => console.error("Autoplay failed", e));
-      };
+      videoElement.play().catch(e => console.error("Autoplay failed", e));
     }
 
     mediaSource.addEventListener('sourceopen', () => {
-      console.log(`MediaSource opened for ${socketId}`);
       try {
-        mediaSource.duration = Infinity;
+        if (MediaSource.isTypeSupported('video/webm; codecs=vp8,opus')) {
+          const sourceBuffer = mediaSource.addSourceBuffer('video/webm; codecs=vp8,opus');
+          sourceBuffersRef.current[socketId] = sourceBuffer;
 
-        if (!MediaSource.isTypeSupported(normalizedMime)) {
-          console.error(`${normalizedMime} is not supported by this browser. Falling back to default.`);
-          if (MediaSource.isTypeSupported('video/webm; codecs="vp8, opus"')) {
-            // Try fallback
-            const sourceBuffer = mediaSource.addSourceBuffer('video/webm; codecs="vp8, opus"');
-            sourceBuffersRef.current[socketId] = sourceBuffer;
-            setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
+          sourceBuffer.addEventListener('updateend', () => {
             processChunkQueue(socketId);
-            return;
-          }
-          return;
+          });
+          sourceBuffer.addEventListener('error', (e) => {
+            console.error('SourceBuffer error:', e);
+          });
+        } else {
+          console.error('VP8/Opus not supported');
         }
-
-        const sourceBuffer = mediaSource.addSourceBuffer(normalizedMime);
-        sourceBuffersRef.current[socketId] = sourceBuffer;
-        sourceBuffer.onerror = (e) => console.error(`SourceBuffer Error for ${socketId}:`, e);
-
-        setupSourceBufferListeners(sourceBuffer, socketId, mediaSource);
-        processChunkQueue(socketId);
       } catch (e) {
         console.error('Error adding source buffer:', e);
       }
@@ -273,31 +200,30 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   };
 
   const cleanupMediaSource = (socketId: string) => {
-    console.log(`Cleaning up MediaSource for ${socketId}`);
-    const mediaSource = mediaSourcesRef.current[socketId];
-    if (mediaSource && mediaSource.readyState === 'open') {
+    if (mediaSourcesRef.current[socketId]) {
       try {
-        mediaSource.endOfStream();
-      } catch (e) {
-        console.error(`Error ending stream for ${socketId}`, e);
-      }
+        const ms = mediaSourcesRef.current[socketId];
+        if (ms.readyState === 'open') ms.endOfStream();
+      } catch (e) { console.error(e); }
+      delete mediaSourcesRef.current[socketId];
+    }
+    if (sourceBuffersRef.current[socketId]) {
+      delete sourceBuffersRef.current[socketId];
+    }
+    if (chunkQueueRef.current[socketId]) {
+      delete chunkQueueRef.current[socketId];
     }
     const userId = socketIdToUserIdMap.current[socketId];
     if (userId && remoteVideoRefs.current[userId]) {
-      const videoEl = remoteVideoRefs.current[userId];
-      if (videoEl) {
-        URL.revokeObjectURL(videoEl.src);
-        videoEl.src = '';
-        videoEl.removeAttribute('src');
+      const el = remoteVideoRefs.current[userId];
+      if (el) {
+        el.src = '';
+        el.removeAttribute('src');
       }
     }
-    delete mediaSourcesRef.current[socketId];
-    delete sourceBuffersRef.current[socketId];
-    delete chunkQueueRef.current[socketId];
-    delete hasReceivedInitSegmentRef.current[socketId];
   };
 
-  const initializeMediaStream = useCallback(async (requestVideo: boolean = false, requestMuted: boolean = true, isInitial: boolean = false) => {
+  const initializeMediaStream = useCallback(async (requestVideo: boolean, requestMuted: boolean, isInitial: boolean) => {
     try {
       console.log(`Client: Initializing media stream (Video: ${requestVideo}, Initial: ${isInitial})...`);
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -397,7 +323,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const socket = io(websocketUrl, {
       autoConnect: false,
       withCredentials: false,
-      extraHeaders: { 'ngrok-skip-browser-warning': 'true' },
       auth: { token: (session.user as { id?: string }).id || session.user.email },
     });
     socketRef.current = socket;
@@ -468,16 +393,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           });
           socketIdToUserIdMap.current[data.socketId] = data.userId;
           userIdToSocketIdMap.current[data.userId] = data.socketId;
-
-          // Resend Init Segment to new user if available
-          if (initSegmentRef.current && socketRef.current) {
-            console.log(`Resending Init Segment to new user ${data.userId}`);
-            socketRef.current.emit('media-chunk', {
-              chunk: initSegmentRef.current,
-              isInit: true,
-              mimeType: mediaRecorderRef.current?.mimeType
-            });
-          }
         }
       });
 
@@ -508,66 +423,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer, isInit: boolean, mimeType?: string }) => {
-        const { socketId, chunk, isInit, mimeType } = data;
-        const blob = new Blob([chunk], { type: mimeType || 'video/webm; codecs=vp8,opus' });
-        const sourceBuffer = sourceBuffersRef.current[socketId];
-        const mediaSource = mediaSourcesRef.current[socketId];
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
+        const { socketId, chunk } = data;
+        const blob = new Blob([chunk], { type: 'video/webm; codecs=vp8,opus' });
 
-        if (isInit) {
-          console.log(`Received Init Segment from ${socketId}, size: ${chunk.byteLength}, mimeType: ${mimeType}`);
-          hasReceivedInitSegmentRef.current[socketId] = true;
-
-          // Force cleanup existing source to ensure fresh start (timestamps, codecs)
-          if (mediaSourcesRef.current[socketId]) {
-            console.log(`Force cleaning up existing MediaSource for ${socketId} on new Init Segment`);
-            cleanupMediaSource(socketId);
+        if (!mediaSourcesRef.current[socketId]) {
+          const userId = socketIdToUserIdMap.current[socketId];
+          if (userId) {
+            setupMediaSource(userId, socketId);
           }
-
-          if (!mediaSourcesRef.current[socketId]) {
-            const userId = socketIdToUserIdMap.current[socketId];
-            if (userId) {
-              setupMediaSource(userId, socketId, mimeType || 'video/webm; codecs=vp8,opus');
-            }
-          }
-
-          const sb = sourceBuffersRef.current[socketId];
-          const ms = mediaSourcesRef.current[socketId];
-
-          if (sb && !sb.updating && ms && ms.readyState === 'open') {
-            try {
-              sb.appendBuffer(await blob.arrayBuffer());
-            } catch (e) {
-              console.error(`Error appending Init Segment for ${socketId}`, e);
-            }
-          }
-          return;
         }
 
-        if (!hasReceivedInitSegmentRef.current[socketId]) {
-          if (!chunkQueueRef.current[socketId]) {
-            chunkQueueRef.current[socketId] = [];
-          }
-          chunkQueueRef.current[socketId].push(blob);
-          return;
+        if (!chunkQueueRef.current[socketId]) {
+          chunkQueueRef.current[socketId] = [];
         }
-
-        if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
-          try {
-            sourceBuffer.appendBuffer(await blob.arrayBuffer());
-          } catch (e) {
-            if (e instanceof DOMException && e.name === 'InvalidStateError') {
-              // ignore
-            } else {
-              console.error(`Error appending buffer for ${socketId}`, e);
-            }
-          }
-        } else {
-          if (!chunkQueueRef.current[socketId]) {
-            chunkQueueRef.current[socketId] = [];
-          }
-          chunkQueueRef.current[socketId].push(blob);
-        }
+        chunkQueueRef.current[socketId].push(blob);
+        processChunkQueue(socketId);
       });
 
       socket.on('chat-message', (data: { userId: string, username: string, message: string, timestamp: Date, avatar_url?: string }) => {
