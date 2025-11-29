@@ -706,7 +706,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   if (el) {
                     const socketId = userIdToSocketIdMap.current[participant.userId];
                     if (socketId && !mediaSourcesRef.current[socketId]) {
-                      setupMediaSource(participant.userId, socketId, 'video/webm; codecs=vp8,opus');
+                      setupMediaSource(participant.userId, socketId);
                     }
                   }
                 }
