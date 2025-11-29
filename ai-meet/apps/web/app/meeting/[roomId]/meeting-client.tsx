@@ -130,19 +130,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       const mediaRecorder = new MediaRecorder(stream, options);
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0 && socketRef.current?.connected) {
-          socketRef.current.emit('media-chunk', {
+        if (event.data && event.data.size > 0) {
+          console.log(`Sending chunk: ${event.data.size} bytes, type: ${mediaRecorder.mimeType}`);
+          socketRef.current?.emit('media-chunk', {
             chunk: event.data,
             socketId: socketRef.current.id
           });
         }
       };
 
-      mediaRecorder.onstart = () => console.log('MediaRecorder started');
+      mediaRecorder.onstart = () => console.log('MediaRecorder started', mediaRecorder.mimeType);
       mediaRecorder.onerror = (e) => console.error('MediaRecorder error:', e);
 
       mediaRecorderRef.current = mediaRecorder;
-      mediaRecorder.start(100);
+      mediaRecorder.start(1000); // Increased to 1000ms to ensure valid Init Segment
     } catch (e) {
       console.error('MediaRecorder setup failed:', e);
     }
@@ -323,6 +324,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const socket = io(websocketUrl, {
       autoConnect: false,
       withCredentials: false,
+      transports: ['websocket'],
       auth: { token: (session.user as { id?: string }).id || session.user.email },
     });
     socketRef.current = socket;
