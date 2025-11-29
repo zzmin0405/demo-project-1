@@ -1006,7 +1006,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   participant={p}
                   isPinned={p.userId === pinnedUserId}
                   onPin={(userId) => setPinnedUserId(pinnedUserId === userId ? null : userId)}
-                  onRemoteVideoRef={(userId, el) => {
+                  onRemoteVideoRef={(userId: string, el: HTMLVideoElement | null) => {
                     if (userId) {
                       remoteVideoRefs.current[userId] = el;
                       // Late Attach Logic: If MediaSource exists but video element has no src, attach it now
@@ -1014,7 +1014,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                       if (socketId && mediaSourcesRef.current[socketId] && el && !el.src) {
                         console.log(`[Late Attach] Attaching existing MediaSource to new video element for ${userId}`);
                         el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
-                        el.onloadedmetadata = () => el.play().catch(e => console.error("Autoplay failed", e));
+                        el.onloadedmetadata = () => el.play().catch((e: any) => console.error("Autoplay failed", e));
                       }
                     }
                   }}
