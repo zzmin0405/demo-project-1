@@ -1005,7 +1005,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   key={p.userId}
                   participant={p}
                   isPinned={p.userId === pinnedUserId}
-                  onPin={(userId) => setPinnedUserId(isPinned ? null : userId)}
+                  onPin={(userId) => setPinnedUserId(pinnedUserId === userId ? null : userId)}
                   onRemoteVideoRef={(userId, el) => { if (userId) remoteVideoRefs.current[userId] = el; }}
                 />
               ))}
