@@ -24,7 +24,7 @@ async function bootstrap() {
     });
     console.log('CORS enabled for ALL origins (Development Mode)');
   }
-  const port = configService.get<number>('PORT') || 3002;
+  const port = configService.get<number>('PORT') || 3001;
   const jwtSecret = configService.get<string>('SUPABASE_JWT_SECRET');
 
   if (!jwtSecret) {

@@ -133,14 +133,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
-          console.log(`Sending chunk: ${event.data.size} bytes, type: ${mediaRecorder.mimeType}, isInit: ${isFirstChunk}`);
-          socketRef.current?.emit('media-chunk', {
-            chunk: event.data,
-            socketId: socketRef.current.id,
-            isInit: isFirstChunk,
-            mimeType: mediaRecorder.mimeType
-          });
-          isFirstChunk = false;
+          socketRef.current?.emit('media-chunk', event.data);
         }
       };
 
@@ -148,47 +141,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       mediaRecorder.onerror = (e) => console.error('MediaRecorder error:', e);
 
       mediaRecorderRef.current = mediaRecorder;
-      mediaRecorder.start(1000); // Increased to 1000ms to ensure valid Init Segment
+      mediaRecorder.start(1500);
     } catch (e) {
       console.error('MediaRecorder setup failed:', e);
     }
   };
 
-  const processChunkQueue = async (socketId: string) => {
-    const sourceBuffer = sourceBuffersRef.current[socketId];
-    const mediaSource = mediaSourcesRef.current[socketId];
-    const queue = chunkQueueRef.current[socketId];
 
-    if (sourceBuffer && mediaSource && mediaSource.readyState === 'open' && !sourceBuffer.updating && queue && queue.length > 0) {
-      const chunk = queue.shift();
-      if (chunk) {
-        try {
-          const buffer = await chunk.arrayBuffer();
-          // Double check: ensure sourceBuffer is still valid and part of the mediaSource
-          const currentSourceBuffer = sourceBuffersRef.current[socketId];
-          const currentMediaSource = mediaSourcesRef.current[socketId];
 
-          if (currentSourceBuffer === sourceBuffer &&
-            currentMediaSource === mediaSource &&
-            mediaSource.readyState === 'open' &&
-            !sourceBuffer.updating) {
-            try {
-              sourceBuffer.appendBuffer(buffer);
-            } catch (appendError) {
-              console.error('Error appending buffer (inner):', appendError);
-            }
-          }
-        } catch (e) {
-          console.error('Error processing chunk:', e);
-        }
-      }
-    }
-  };
-
-  const setupMediaSource = (userId: string, socketId: string, mimeType: string = 'video/webm; codecs=vp8,opus') => {
+  const setupMediaSource = (userId: string, socketId: string) => {
     if (mediaSourcesRef.current[socketId]) return;
 
-    console.log(`Setting up MediaSource for ${userId} with mimeType: ${mimeType}`);
+    console.log(`Setting up MediaSource for ${userId}`);
     const mediaSource = new MediaSource();
     mediaSourcesRef.current[socketId] = mediaSource;
 
@@ -200,23 +164,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     mediaSource.addEventListener('sourceopen', () => {
       try {
-        if (MediaSource.isTypeSupported(mimeType)) {
-          const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
-          sourceBuffer.mode = 'sequence'; // Use sequence mode to handle timestamp resets automatically
+        const mime = 'video/webm; codecs="vp8, opus"';
+        if (MediaSource.isTypeSupported(mime)) {
+          const sourceBuffer = mediaSource.addSourceBuffer(mime);
           sourceBuffersRef.current[socketId] = sourceBuffer;
 
-          sourceBuffer.addEventListener('updateend', () => {
-            processChunkQueue(socketId);
-          });
-          sourceBuffer.addEventListener('error', (e) => {
-            console.error('SourceBuffer error:', e);
-            if (videoElement && videoElement.error) {
-              console.error("Video Element Error:", videoElement.error);
+          sourceBuffer.addEventListener('updateend', async () => {
+            if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating) {
+              const nextChunk = chunkQueueRef.current[socketId].shift();
+              if (nextChunk) {
+                try {
+                  sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+                } catch (e) {
+                  console.error(`Error appending queued buffer for ${socketId}`, e);
+                }
+              }
             }
-            console.error("MediaSource ReadyState:", mediaSource.readyState);
           });
         } else {
-          console.error(`MimeType ${mimeType} not supported`);
+          console.error(`MimeType ${mime} not supported`);
         }
       } catch (e) {
         console.error('Error adding source buffer:', e);
@@ -350,7 +316,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     if (isInitialized.current) return;
     isInitialized.current = true;
 
-    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
+    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
     const socket = io(websocketUrl, {
       autoConnect: false,
       withCredentials: false,
@@ -385,10 +351,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           hasVideo: localVideoOnRef.current,
           isMuted: isMutedRef.current
         });
-
-        // Request Init Segments from server (Server-Side Caching)
-        console.log('Requesting Init Segments from server...');
-        socket.emit('request-init-segment', { roomId });
 
         let initialVideoOn = false;
         let initialMuted = true;
@@ -472,45 +434,31 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer, isInit?: boolean, mimeType?: string }) => {
-        const { socketId, chunk, isInit, mimeType } = data;
-
-        if (isInit) {
-          console.log(`Received Init Segment from ${socketId} with mimeType: ${mimeType}`);
-
-          // Hard Reset: If we already have a MediaSource, clean it up to start fresh.
-          // This prevents "Buffer Header" conflicts and SourceBuffer errors when switching streams.
-          if (mediaSourcesRef.current[socketId]) {
-            console.log(`[HardReset] Cleaning up existing MediaSource for ${socketId} before applying new Init Segment`);
-            cleanupMediaSource(socketId);
-          }
-
-          hasReceivedInitSegmentRef.current[socketId] = true;
-          if (mimeType) {
-            remoteMimeTypesRef.current[socketId] = mimeType;
-          }
-        }
-
-        if (!hasReceivedInitSegmentRef.current[socketId]) {
-          console.warn(`Dropping chunk from ${socketId} (No Init Segment received yet)`);
-          return;
-        }
-
-        const currentMimeType = remoteMimeTypesRef.current[socketId] || 'video/webm; codecs=vp8,opus';
-        const blob = new Blob([chunk], { type: currentMimeType });
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
+        const { socketId, chunk } = data;
+        const blob = new Blob([chunk], { type: 'video/webm' });
 
         if (!mediaSourcesRef.current[socketId]) {
           const userId = socketIdToUserIdMap.current[socketId];
           if (userId) {
-            setupMediaSource(userId, socketId, currentMimeType);
+            setupMediaSource(userId, socketId);
           }
         }
 
-        if (!chunkQueueRef.current[socketId]) {
-          chunkQueueRef.current[socketId] = [];
+        const sourceBuffer = sourceBuffersRef.current[socketId];
+
+        if (sourceBuffer && !sourceBuffer.updating) {
+          try {
+            sourceBuffer.appendBuffer(await blob.arrayBuffer());
+          } catch (e) {
+            console.error(`Error appending buffer for ${socketId}`, e);
+          }
+        } else {
+          if (!chunkQueueRef.current[socketId]) {
+            chunkQueueRef.current[socketId] = [];
+          }
+          chunkQueueRef.current[socketId].push(blob);
         }
-        chunkQueueRef.current[socketId].push(blob);
-        processChunkQueue(socketId);
       });
 
       socket.on('chat-message', (data: { userId: string, username: string, message: string, timestamp: Date, avatar_url?: string }) => {
