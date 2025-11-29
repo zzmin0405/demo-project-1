@@ -21,7 +21,7 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: true, // Allow all origins dynamically (equivalent to * but supports credentials)
+    origin: ["https://demo-project-1-git-feature-websocket-bde422-zzmin0405s-projects.vercel.app", "http://localhost:3000"], // Hardcode for certainty
     methods: ["GET", "POST"],
     allowedHeaders: ['ngrok-skip-browser-warning', 'authorization', 'content-type'],
     credentials: true,
