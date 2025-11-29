@@ -128,14 +128,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     try {
       const options = { mimeType: 'video/webm; codecs=vp8,opus' };
       const mediaRecorder = new MediaRecorder(stream, options);
+      let isFirstChunk = true;
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
-          console.log(`Sending chunk: ${event.data.size} bytes, type: ${mediaRecorder.mimeType}`);
+          console.log(`Sending chunk: ${event.data.size} bytes, type: ${mediaRecorder.mimeType}, isInit: ${isFirstChunk}`);
           socketRef.current?.emit('media-chunk', {
             chunk: event.data,
-            socketId: socketRef.current.id
+            socketId: socketRef.current.id,
+            isInit: isFirstChunk
           });
+          isFirstChunk = false;
         }
       };
 
@@ -455,8 +458,19 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
-        const { socketId, chunk } = data;
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer, isInit?: boolean }) => {
+        const { socketId, chunk, isInit } = data;
+
+        if (isInit) {
+          console.log(`Received Init Segment from ${socketId}`);
+          hasReceivedInitSegmentRef.current[socketId] = true;
+        }
+
+        if (!hasReceivedInitSegmentRef.current[socketId]) {
+          console.warn(`Dropping chunk from ${socketId} (No Init Segment received yet)`);
+          return;
+        }
+
         const blob = new Blob([chunk], { type: 'video/webm; codecs=vp8,opus' });
 
         if (!mediaSourcesRef.current[socketId]) {
