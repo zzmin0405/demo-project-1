@@ -21,12 +21,10 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: '*', // For development only. Restrict this in production.
+    allowedHeaders: ['ngrok-skip-browser-warning', 'authorization', 'content-type'],
     credentials: false,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
   },
-  transports: ['websocket', 'polling'],
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(private prisma: PrismaService) { }
@@ -132,7 +130,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             this.userIdToRoom.delete(leavingUser.userId);
           }
 
-          this.server.to(roomId).emit('user-left', { userId: leavingUser.userId, socketId: client.id });
+          this.server.to(roomId).emit('user-left', { userId: leavingUser.userId });
           console.log(`Client ${leavingUser.userId} left room ${roomId}`);
 
           // DB Sync: Update leftAt
@@ -150,7 +148,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         } else {
           console.log(`Client ${leavingUser.userId} socket ${client.id} disconnected, but user remains in room (refresh/ghost).`);
         }
-
         return;
       }
     }
@@ -255,26 +252,32 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     // DB Sync: Upsert Participant record
     try {
-      await this.prisma.participant.upsert({
-        where: {
-          userId_meetingRoomId: {
+      // First check if user exists to avoid P2003
+      const userExists = await this.prisma.user.findUnique({ where: { id: userId } });
+      if (userExists) {
+        await this.prisma.participant.upsert({
+          where: {
+            userId_meetingRoomId: {
+              userId: userId,
+              meetingRoomId: roomId
+            }
+          },
+          update: {
+            joinedAt: new Date(),
+            leftAt: null,
+            status: 'APPROVED',
+            role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
+          },
+          create: {
             userId: userId,
-            meetingRoomId: roomId
+            meetingRoomId: roomId,
+            status: 'APPROVED',
+            role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
           }
-        },
-        update: {
-          joinedAt: new Date(),
-          leftAt: null,
-          status: 'APPROVED',
-          role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
-        },
-        create: {
-          userId: userId,
-          meetingRoomId: roomId,
-          status: 'APPROVED',
-          role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
-        }
-      });
+        });
+      } else {
+        console.warn(`[ParticipantSync] User ${userId} not found in DB. Skipping participant record creation.`);
+      }
     } catch (dbError) {
       console.error('Failed to sync participant to DB:', dbError);
     }
@@ -356,7 +359,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
           this.userIdToRoom.delete(userId);
 
           // Notify others
-          this.server.to(roomId).emit('user-left', { userId, socketId: socketIdToRemove });
+          this.server.to(roomId).emit('user-left', { userId });
 
           // DB Update
           await this.prisma.participant.updateMany({
@@ -367,13 +370,18 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
   }
+
   @SubscribeMessage('media-chunk')
-  handleMediaChunk(client: Socket, chunk: Buffer): void {
+  handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string } | any): void {
     const roomId = Array.from(client.rooms).find(r => r !== client.id);
     if (roomId) {
+      const chunk = payload.chunk || payload;
+      const mimeType = payload.mimeType || 'video/webm; codecs="vp8, opus"';
+
       client.to(roomId).emit('media-chunk', {
         socketId: client.id,
         chunk: chunk,
+        mimeType: mimeType
       });
     }
   }
