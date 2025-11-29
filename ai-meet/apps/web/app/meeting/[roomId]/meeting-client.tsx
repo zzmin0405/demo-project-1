@@ -237,6 +237,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     if (chunkQueueRef.current[socketId]) {
       delete chunkQueueRef.current[socketId];
     }
+    if (hasReceivedInitSegmentRef.current[socketId]) {
+      delete hasReceivedInitSegmentRef.current[socketId];
+    }
+    if (remoteMimeTypesRef.current[socketId]) {
+      delete remoteMimeTypesRef.current[socketId];
+    }
     const userId = socketIdToUserIdMap.current[socketId];
     if (userId && remoteVideoRefs.current[userId]) {
       const el = remoteVideoRefs.current[userId];
@@ -469,6 +475,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         if (isInit) {
           console.log(`Received Init Segment from ${socketId} with mimeType: ${mimeType}`);
+
+          // Hard Reset: If we already have a MediaSource, clean it up to start fresh.
+          // This prevents "Buffer Header" conflicts and SourceBuffer errors when switching streams.
+          if (mediaSourcesRef.current[socketId]) {
+            console.log(`[HardReset] Cleaning up existing MediaSource for ${socketId} before applying new Init Segment`);
+            cleanupMediaSource(socketId);
+          }
+
           hasReceivedInitSegmentRef.current[socketId] = true;
           if (mimeType) {
             remoteMimeTypesRef.current[socketId] = mimeType;
