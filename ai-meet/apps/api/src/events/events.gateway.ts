@@ -21,7 +21,7 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: '*', // For development only. Restrict this in production.
+    origin: '*', // Allow all origins
     allowedHeaders: ['ngrok-skip-browser-warning', 'authorization', 'content-type'],
     credentials: false,
   },
