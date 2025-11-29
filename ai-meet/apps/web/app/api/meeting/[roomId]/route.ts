@@ -37,7 +37,7 @@ export async function DELETE(
         }
 
         // Call NestJS API to force delete and kick users
-        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3001';
+        const backendUrl = process.env.BACKEND_URL || 'https://saprophytically-unhashed-freda.ngrok-free.dev';
         const response = await fetch(`${backendUrl}/meetings/${roomId}`, {
             method: 'DELETE',
             headers: {
@@ -57,7 +57,7 @@ export async function DELETE(
         console.error('Error deleting meeting:', error);
         return NextResponse.json({
             error: `Internal Error: ${error instanceof Error ? error.message : String(error)}`,
-            backendUrl: process.env.BACKEND_URL || 'http://localhost:3001 (Default)'
+            backendUrl: process.env.BACKEND_URL || 'https://saprophytically-unhashed-freda.ngrok-free.dev'
         }, { status: 500 });
     }
 }
