@@ -356,6 +356,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       withCredentials: false,
       transports: ['websocket'],
       auth: { token: (session.user as { id?: string }).id || session.user.email },
+      extraHeaders: {
+        "ngrok-skip-browser-warning": "true"
+      }
     });
     socketRef.current = socket;
 
