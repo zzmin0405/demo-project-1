@@ -508,7 +508,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
     }
 
-    mediaSource.addEventListener('sourceopen', () => {
+    mediaSource.addEventListener('sourceopen', async () => {
       console.log(`MediaSource opened for ${socketId}`);
       try {
         if (!MediaSource.isTypeSupported(mimeType)) {
