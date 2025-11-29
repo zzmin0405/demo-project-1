@@ -151,14 +151,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const processChunkQueue = async (socketId: string) => {
     const sourceBuffer = sourceBuffersRef.current[socketId];
+    const mediaSource = mediaSourcesRef.current[socketId];
     const queue = chunkQueueRef.current[socketId];
 
-    if (sourceBuffer && !sourceBuffer.updating && queue && queue.length > 0) {
+    if (sourceBuffer && mediaSource && mediaSource.readyState === 'open' && !sourceBuffer.updating && queue && queue.length > 0) {
       const chunk = queue.shift();
       if (chunk) {
         try {
           const buffer = await chunk.arrayBuffer();
-          sourceBuffer.appendBuffer(buffer);
+          // Double check before appending
+          if (mediaSource.readyState === 'open' && !sourceBuffer.updating) {
+            sourceBuffer.appendBuffer(buffer);
+          }
         } catch (e) {
           console.error('Error appending buffer:', e);
         }
