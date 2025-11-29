@@ -153,7 +153,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
     isInitialized.current = true;
 
-    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3002';
+    const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
     console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
@@ -217,7 +217,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           }
         }
 
-        initializeMediaStream(initialVideoOn, true); // isInitial = true
+        initializeMediaStream(initialVideoOn, initialMuted, true); // isInitial = true
 
       });
 
@@ -266,13 +266,30 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer }) => {
-        const { socketId, chunk } = data;
-        const blob = new Blob([chunk], { type: 'video/webm' });
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
+        const { socketId, chunk, mimeType = 'video/webm; codecs="vp8, opus"' } = data;
+        const blob = new Blob([chunk], { type: mimeType });
+
+        if (!mediaSourcesRef.current[socketId]) {
+          const userId = socketIdToUserIdMap.current[socketId];
+          if (userId) {
+            setupMediaSource(userId, socketId, mimeType);
+          }
+        }
+
         const sourceBuffer = sourceBuffersRef.current[socketId];
         const mediaSource = mediaSourcesRef.current[socketId];
 
-        if (sourceBuffer && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
+        // Always queue if sourceBuffer doesn't exist yet
+        if (!sourceBuffer) {
+          if (!chunkQueueRef.current[socketId]) {
+            chunkQueueRef.current[socketId] = [];
+          }
+          chunkQueueRef.current[socketId].push(blob);
+          return;
+        }
+
+        if (!sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
           try {
             sourceBuffer.appendBuffer(await blob.arrayBuffer());
           } catch (e) {
@@ -427,9 +444,23 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, [micVolume]);
 
+  // Use callback ref to set initial ref
+  const setLocalVideoRef = (element: HTMLVideoElement | null) => {
+    localVideoRef.current = element;
+    if (element && localStream) {
+      console.log('[Callback Ref] Setting srcObject...');
+      element.srcObject = localStream;
+      console.log('[Callback Ref] srcObject set successfully');
+    }
+  };
+
+  // Also use useEffect to update when localStream changes
   useEffect(() => {
+    console.log('[useEffect srcObject] Triggered. localStream:', !!localStream, 'localVideoRef.current:', !!localVideoRef.current);
     if (localStream && localVideoRef.current) {
+      console.log('[useEffect srcObject] Setting srcObject...');
       localVideoRef.current.srcObject = localStream;
+      console.log('[useEffect srcObject] srcObject set successfully');
     }
   }, [localStream]);
 
@@ -438,28 +469,37 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       mediaRecorderRef.current.stop();
     }
     if (socketRef.current && stream) {
-      const options = { mimeType: 'video/webm; codecs=vp8,opus' };
+      const hasVideo = stream.getVideoTracks().length > 0;
+      const mimeType = hasVideo ? 'video/webm; codecs=vp8,opus' : 'audio/webm; codecs=opus';
+      console.log(`Client: Setting up MediaRecorder with mimeType: ${mimeType}`);
+
+      const options = { mimeType };
       try {
         const mediaRecorder = new MediaRecorder(stream, options);
 
         mediaRecorder.ondataavailable = (event) => {
+          console.log(`[MediaRecorder] ondataavailable triggered, data size: ${event.data?.size || 0}`);
           if (event.data && event.data.size > 0 && socketRef.current) {
-            socketRef.current.emit('media-chunk', event.data);
+            console.log(`[MediaRecorder] Emitting media-chunk, size: ${event.data.size}, mimeType: ${mimeType}`);
+            socketRef.current.emit('media-chunk', { chunk: event.data, mimeType });
+          } else {
+            console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
           }
         };
         mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(300);
+        mediaRecorder.start(1000);
+        console.log('Client: MediaRecorder started');
       } catch (e) {
         console.error('MediaRecorder setup failed:', e);
       }
     }
   };
 
-  const setupMediaSource = (userId: string, socketId: string) => {
+  const setupMediaSource = (userId: string, socketId: string, mimeType: string = 'video/webm; codecs="vp8, opus"') => {
     if (mediaSourcesRef.current[socketId] || !remoteVideoRefs.current[userId]) {
       return;
     }
-    console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId}`);
+    console.log(`Setting up MediaSource for userId: ${userId}, socketId: ${socketId} with mimeType: ${mimeType}`);
     const mediaSource = new MediaSource();
     mediaSourcesRef.current[socketId] = mediaSource;
     const videoElement = remoteVideoRefs.current[userId];
@@ -472,12 +512,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     mediaSource.addEventListener('sourceopen', () => {
       console.log(`MediaSource opened for ${socketId}`);
       try {
-        const mime = 'video/webm; codecs="vp8, opus"';
-        if (!MediaSource.isTypeSupported(mime)) {
-          console.error(`${mime} is not supported`);
+        if (!MediaSource.isTypeSupported(mimeType)) {
+          console.error(`${mimeType} is not supported`);
           return;
         }
-        const sourceBuffer = mediaSource.addSourceBuffer(mime);
+        const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
         sourceBuffersRef.current[socketId] = sourceBuffer;
 
         sourceBuffer.addEventListener('updateend', async () => {
@@ -529,6 +568,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
 
   // Effect to set up MediaSource for participants when they are added and video elements are ready
+  // REMOVED: Proactive setup is removed to allow socket.on('media-chunk') to determine the correct mimeType.
+  /*
   useEffect(() => {
     participants.forEach(p => {
       const socketId = userIdToSocketIdMap.current[p.userId];
@@ -537,26 +578,21 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       }
     });
   }, [participants]);
+  */
 
-  const initializeMediaStream = async (requestVideo: boolean = false, isInitial: boolean = false) => {
+  const initializeMediaStream = async (initialVideoOn: boolean = false, initialMuted: boolean = true, isInitial: boolean = false) => {
     try {
-      console.log(`Client: Initializing media stream (Video: ${requestVideo}, Initial: ${isInitial})...`);
+      console.log(`Client: Initializing media stream (Always request audio+video, Initial video: ${initialVideoOn}, Initial muted: ${initialMuted})...`);
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = devices.filter(device => device.kind === 'videoinput');
       setAvailableVideoDevices(videoDevices);
       setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
       setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
 
-      // Check if camera exists
-      if (requestVideo && videoDevices.length === 0) {
-        console.warn('No camera found. Falling back to audio-only.');
-        // Alert removed as per user request
-        requestVideo = false;
-      }
-
-      const videoConstraint: boolean | MediaTrackConstraints = requestVideo
-        ? (selectedVideoDeviceId ? { deviceId: { exact: selectedVideoDeviceId } } : true)
-        : false;
+      // Always request both video and audio
+      const videoConstraint: boolean | MediaTrackConstraints = selectedVideoDeviceId
+        ? { deviceId: { exact: selectedVideoDeviceId } }
+        : true;
 
       const audioConstraint: boolean | MediaTrackConstraints = selectedAudioInputDeviceId
         ? { deviceId: { exact: selectedAudioInputDeviceId } }
@@ -567,6 +603,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         audio: audioConstraint
       });
 
+      // Set initial video track state based on user preference
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = initialVideoOn;
+      }
+
       // --- Audio Processing for Volume Control ---
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const audioContext = new AudioContextClass();
@@ -574,10 +616,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       const gainNode = audioContext.createGain();
       const destination = audioContext.createMediaStreamDestination();
 
-      // Initialize gain based on current mute state (or the intent to unmute if called from toggleMute)
-      // Note: If called from toggleMute, we set isMuted=false BEFORE calling this, so this should be correct.
-      // If called from toggleCamera (and no stream), isMuted is likely true (default), so we start muted.
-      gainNode.gain.value = isMuted ? 0 : micVolume;
+      // Set initial gain based on mute preference
+      gainNode.gain.value = initialMuted ? 0 : micVolume;
 
       source.connect(gainNode);
       gainNode.connect(destination);
@@ -587,13 +627,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       audioSourceRef.current = source;
       audioDestinationRef.current = destination;
 
-      // Create a mixed stream for MediaRecorder
+      // Create a mixed stream for MediaRecorder (ALWAYS includes both audio and video)
       const processedAudioTrack = destination.stream.getAudioTracks()[0];
-      const tracks = [processedAudioTrack];
-      if (requestVideo) {
-        tracks.unshift(...stream.getVideoTracks());
-      }
-      const mixedStream = new MediaStream(tracks);
+      const mixedStream = new MediaStream([
+        ...stream.getVideoTracks(),
+        processedAudioTrack
+      ]);
       // -------------------------------------------
 
       if (localStreamRef.current) {
@@ -602,56 +641,39 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       setLocalStream(stream);
       localStreamRef.current = stream;
-      setLocalVideoOn(requestVideo);
-      console.log('Client: Media stream initialized.');
+      setLocalVideoOn(initialVideoOn);
+      setIsMuted(initialMuted);
+      console.log('Client: Media stream initialized (always-on mode).');
 
       setupMediaRecorder(mixedStream);
 
-      if (requestVideo) {
-        socketRef.current?.emit('camera-state-changed', {
-          roomId,
-          userId: session?.user?.email,
-          hasVideo: true
-        });
-      }
+      // Emit initial camera state
+      socketRef.current?.emit('camera-state-changed', {
+        roomId,
+        userId: session?.user?.email,
+        hasVideo: initialVideoOn
+      });
 
-      // Emit initial mic state (which should be unmuted if we just initialized)
+      // Emit initial mic state
       socketRef.current?.emit('mic-state-changed', {
         roomId,
         userId: session?.user?.email,
-        isMuted: isMuted // This might be stale if called from toggleMute, but toggleMute emits its own event
+        isMuted: initialMuted
       });
 
     } catch (err) {
       console.error('Error accessing media devices:', err);
 
-      // Retry logic for NotReadableError (often caused by rapid reloads or zombie locks)
-      if (err instanceof DOMException && err.name === 'NotReadableError') {
-        console.log('Camera locked. Retrying in 1 second...');
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        try {
-          // Retry without specific deviceId to be safe
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: selectedAudioInputDeviceId ? { deviceId: { exact: selectedAudioInputDeviceId } } : true
-          });
-          // ... (Duplicate success logic or extract to function - for now, let's just recurse or handle simply)
-          // To avoid code duplication, it's better to just alert for now, or use a recursive approach with a retry counter.
-          // Let's alert with a specific "Retry" suggestion.
-          alert('카메라가 일시적으로 잠겨있습니다. 1초 뒤 다시 시도하거나 브라우저를 완전히 껐다 켜주세요.');
-          return;
-        } catch (retryErr) {
-          console.error('Retry failed:', retryErr);
-        }
-      }
-
       if (err instanceof DOMException) {
         if (err.name === 'NotAllowedError') {
           alert('카메라/마이크 권한이 거부되었습니다. 브라우저 주소창의 자물쇠 아이콘을 클릭하여 권한을 허용해주세요.');
+          // Disconnect and go back to home
+          socketRef.current?.disconnect();
+          router.push('/');
         } else if (err.name === 'NotReadableError') {
           if (!isInitial) alert('카메라 하드웨어 오류: 장치가 응답하지 않습니다. (잠시 후 다시 시도하거나 컴퓨터를 재부팅해주세요)');
         } else if (err.name === 'NotFoundError') {
-          if (!isInitial) alert('카메라/마이크를 찾을 수 없습니다. 장치가 올바르게 연결되었는지 확인해주세요.');
+          alert('카메라/마이크를 찾을 수 없습니다. 장치가 올바르게 연결되었는지 확인해주세요.');
         } else {
           if (!isInitial) alert(`미디어 장치 오류: ${err.message}`);
         }
@@ -661,88 +683,37 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
-  const toggleCamera = async () => {
-    if (!localStreamRef.current) {
-      await initializeMediaStream(true);
+  const toggleCamera = () => {
+    console.log('[toggleCamera] Called');
+    const videoTrack = localStreamRef.current?.getVideoTracks()[0];
+    if (!videoTrack) {
+      console.warn('[toggleCamera] No video track available. Media stream not initialized.');
       return;
     }
 
-    const videoTrack = localStreamRef.current.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      setLocalVideoOn(videoTrack.enabled);
+    console.log(`[toggleCamera] Current enabled: ${videoTrack.enabled}, localVideoOn: ${localVideoOn}`);
+    videoTrack.enabled = !videoTrack.enabled;
+    setLocalVideoOn(videoTrack.enabled);
+    console.log(`[toggleCamera] New enabled: ${videoTrack.enabled}, will set localVideoOn to: ${videoTrack.enabled}`);
 
-      socketRef.current?.emit('camera-state-changed', {
-        roomId,
-        userId: session?.user?.email,
-        hasVideo: videoTrack.enabled,
-      });
-    } else {
-      // Stream exists but no video track (Audio only mode -> Video mode)
-      try {
-        const videoConstraint: boolean | MediaTrackConstraints = selectedVideoDeviceId
-          ? { deviceId: { exact: selectedVideoDeviceId } }
-          : true;
-
-        const videoStream = await navigator.mediaDevices.getUserMedia({
-          video: videoConstraint
-        });
-        const newVideoTrack = videoStream.getVideoTracks()[0];
-        localStreamRef.current.addTrack(newVideoTrack);
-        setLocalVideoOn(true);
-
-        // We need to reconstruct the mixed stream for MediaRecorder
-        if (audioDestinationRef.current) {
-          const processedAudioTrack = audioDestinationRef.current.stream.getAudioTracks()[0];
-          const mixedStream = new MediaStream([
-            newVideoTrack,
-            processedAudioTrack
-          ]);
-          setupMediaRecorder(mixedStream);
-        }
-
-        socketRef.current?.emit('camera-state-changed', {
-          roomId,
-          userId: session?.user?.email,
-          hasVideo: true,
-        });
-      } catch (e) {
-        console.error("Failed to add video track:", e);
-        if (e instanceof DOMException && e.name === 'NotAllowedError') {
-          alert('카메라 권한이 거부되었습니다. 설정에서 권한을 허용해주세요.');
-        }
-      }
-    }
+    socketRef.current?.emit('camera-state-changed', {
+      roomId,
+      userId: session?.user?.email,
+      hasVideo: videoTrack.enabled,
+    });
+    console.log(`[toggleCamera] Emitted camera-state-changed: ${videoTrack.enabled}`);
   };
 
-  const toggleMute = async () => {
-    let newMutedState = !isMuted;
-
-    if (!localStreamRef.current) {
-      // Initialize audio only
-      setIsMuted(false); // Optimistically set mute to false since user clicked unmute
-      newMutedState = false;
-      await initializeMediaStream(false);
-    } else {
-      if (localStreamRef.current) {
-        // If using AudioContext, mute the gain node
-        if (gainNodeRef.current) {
-          // Toggle mute state
-          setIsMuted(newMutedState);
-          gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
-        } else {
-          // Fallback
-          const audioTrack = localStreamRef.current.getAudioTracks()[0];
-          if (audioTrack) {
-            audioTrack.enabled = !audioTrack.enabled;
-            setIsMuted(!audioTrack.enabled);
-            newMutedState = !audioTrack.enabled;
-          }
-        }
-      }
+  const toggleMute = () => {
+    if (!gainNodeRef.current) {
+      console.warn('GainNode not available. Media stream not initialized.');
+      return;
     }
 
-    // Emit state change
+    const newMutedState = !isMuted;
+    setIsMuted(newMutedState);
+    gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
+
     socketRef.current?.emit('mic-state-changed', {
       roomId,
       userId: session?.user?.email,
@@ -876,7 +847,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         <div className="w-full h-full flex items-center justify-center bg-black/90">
           {isLocal ? (
             <video
-              ref={localVideoRef}
+              ref={setLocalVideoRef}
               autoPlay
               muted
               playsInline

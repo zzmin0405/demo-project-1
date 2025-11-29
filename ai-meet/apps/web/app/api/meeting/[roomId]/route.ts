@@ -5,7 +5,7 @@ import { prisma } from '@/lib/prisma';
 
 export async function DELETE(
     req: Request,
-    { params }: { params: { roomId: string } }
+    { params }: { params: Promise<{ roomId: string }> }
 ) {
     try {
         const session = await getServerSession(authOptions);
@@ -13,11 +13,7 @@ export async function DELETE(
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const roomId = params.roomId;
-
-        // Verify ownership
-        // We need to fetch the user first to compare IDs or use email if creator relation is loaded
-        // Ideally we should compare creatorId with user.id
+        const { roomId } = await params;
 
         const user = await prisma.user.findUnique({
             where: { email: session.user.email },
@@ -40,7 +36,7 @@ export async function DELETE(
         }
 
         // Call NestJS API to force delete and kick users
-        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3002';
+        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3001';
         const response = await fetch(`${backendUrl}/meetings/${roomId}`, {
             method: 'DELETE',
         });

@@ -17,7 +17,7 @@ async function bootstrap() {
     app.enableCors(); // Default (allows all, but credentials might be limited)
     console.log('CORS enabled for ALL origins (Development Mode)');
   }
-  const port = configService.get<number>('PORT') || 3002;
+  const port = configService.get<number>('PORT') || 3001;
   const jwtSecret = configService.get<string>('SUPABASE_JWT_SECRET');
 
   if (!jwtSecret) {

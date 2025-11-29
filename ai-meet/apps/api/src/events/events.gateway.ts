@@ -22,6 +22,8 @@ interface Participant {
 @WebSocketGateway({
   cors: {
     origin: '*', // For development only. Restrict this in production.
+    allowedHeaders: ['ngrok-skip-browser-warning', 'authorization', 'content-type'],
+    credentials: false,
   },
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -250,26 +252,32 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     // DB Sync: Upsert Participant record
     try {
-      await this.prisma.participant.upsert({
-        where: {
-          userId_meetingRoomId: {
+      // First check if user exists to avoid P2003
+      const userExists = await this.prisma.user.findUnique({ where: { id: userId } });
+      if (userExists) {
+        await this.prisma.participant.upsert({
+          where: {
+            userId_meetingRoomId: {
+              userId: userId,
+              meetingRoomId: roomId
+            }
+          },
+          update: {
+            joinedAt: new Date(),
+            leftAt: null,
+            status: 'APPROVED',
+            role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
+          },
+          create: {
             userId: userId,
-            meetingRoomId: roomId
+            meetingRoomId: roomId,
+            status: 'APPROVED',
+            role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
           }
-        },
-        update: {
-          joinedAt: new Date(),
-          leftAt: null,
-          status: 'APPROVED',
-          role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
-        },
-        create: {
-          userId: userId,
-          meetingRoomId: roomId,
-          status: 'APPROVED',
-          role: roomInfo?.creatorId === userId ? 'HOST' : 'PARTICIPANT'
-        }
-      });
+        });
+      } else {
+        console.warn(`[ParticipantSync] User ${userId} not found in DB. Skipping participant record creation.`);
+      }
     } catch (dbError) {
       console.error('Failed to sync participant to DB:', dbError);
     }
@@ -362,14 +370,18 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
   }
-  @SubscribeMessage('media-chunk')
-  handleMediaChunk(client: Socket, chunk: Buffer): void {
-    const [socketId, roomId] = Array.from(client.rooms);
 
+  @SubscribeMessage('media-chunk')
+  handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string } | any): void {
+    const roomId = Array.from(client.rooms).find(r => r !== client.id);
     if (roomId) {
+      const chunk = payload.chunk || payload;
+      const mimeType = payload.mimeType || 'video/webm; codecs="vp8, opus"';
+
       client.to(roomId).emit('media-chunk', {
         socketId: client.id,
         chunk: chunk,
+        mimeType: mimeType
       });
     }
   }

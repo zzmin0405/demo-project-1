@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth';
 
 export async function POST(
     req: Request,
-    { params }: { params: { roomId: string } }
+    { params }: { params: Promise<{ roomId: string }> }
 ) {
     try {
         const session = await getServerSession(authOptions);
@@ -12,7 +12,7 @@ export async function POST(
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
         }
 
-        const roomId = params.roomId;
+        const { roomId } = await params;
         const userId = (session.user as any).id;
 
         if (!userId) {
@@ -20,7 +20,7 @@ export async function POST(
         }
 
         // Call NestJS API to force leave
-        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3002';
+        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3001';
         const response = await fetch(`${backendUrl}/meetings/${roomId}/leave`, {
             method: 'POST',
             headers: {
