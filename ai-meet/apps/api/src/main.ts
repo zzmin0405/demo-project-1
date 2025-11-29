@@ -7,6 +7,7 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const corsOrigin = configService.get<string>('CORS_ORIGIN');
 
+  /*
   if (corsOrigin) {
     app.enableCors({
       origin: corsOrigin.split(','),
@@ -17,6 +18,15 @@ async function bootstrap() {
     app.enableCors(); // Default (allows all, but credentials might be limited)
     console.log('CORS enabled for ALL origins (Development Mode)');
   }
+  */
+
+  // Force allow all for debugging
+  app.enableCors({
+    origin: true,
+    credentials: true,
+    allowedHeaders: ['ngrok-skip-browser-warning', 'authorization', 'content-type'],
+  });
+  console.log('CORS enabled for ALL origins (Forced Mode)');
   const port = configService.get<number>('PORT') || 3001;
   const jwtSecret = configService.get<string>('SUPABASE_JWT_SECRET');
 

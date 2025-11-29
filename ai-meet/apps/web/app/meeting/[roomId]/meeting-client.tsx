@@ -157,10 +157,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log('Attempting to connect to WebSocket at:', websocketUrl); // DEBUGGING LINE
     const socket = io(websocketUrl, {
       autoConnect: false,
-      transports: ['polling'], // Force Polling ONLY to ensure headers are always sent (WebSocket handshake doesn't support headers in browser)
+      // 중요: polling을 먼저 적어서 헤더를 보내고, 연결되면 websocket으로 업그레이드
+      transports: ['polling', 'websocket'],
       transportOptions: {
         polling: {
           extraHeaders: {
+            // 이 헤더 덕분에 ngrok 경고창을 무시하고 연결됩니다.
             'ngrok-skip-browser-warning': 'true',
           },
         },
