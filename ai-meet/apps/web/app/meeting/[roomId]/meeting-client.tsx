@@ -267,137 +267,89 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
         const { socketId, chunk, mimeType = 'video/webm; codecs="vp8, opus"' } = data;
-        // console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength || chunk.length}`); // Uncomment for verbose debugging
-        const blob = new Blob([chunk], { type: mimeType });
+        socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
+          console.log(`[Client] Camera state changed for ${data.userId}: ${data.hasVideo}`);
+          setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p));
+        });
 
-        if (!mediaSourcesRef.current[socketId]) {
-          let userId = socketIdToUserIdMap.current[socketId];
+        socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
+          setChatMessages(prev => [...prev, data]);
+        });
 
-          // Fallback: Try to find user in participants state if map is missing entry
-          if (!userId) {
-            const p = participants.find((p: any) => p.socketId === socketId);
-            if (p) {
-              console.log(`[MediaChunk] Recovered userId ${p.userId} from participants state for socket ${socketId}`);
-              userId = p.userId;
-              socketIdToUserIdMap.current[socketId] = userId;
-              userIdToSocketIdMap.current[userId] = socketId;
-            }
-          }
+        socket.on('meeting-title-updated', (data: { title: string }) => {
+          setMeetingTitle(data.title);
+        });
 
-          // Always queue if sourceBuffer doesn't exist yet
-          if (!sourceBuffer) {
-            if (!chunkQueueRef.current[socketId]) {
-              chunkQueueRef.current[socketId] = [];
-            }
-            chunkQueueRef.current[socketId].push(blob);
-            return;
-          }
+        socket.on('reaction-received', (data: { userId: string; emoji: string }) => {
+          const newReaction: Reaction = {
+            id: Math.random().toString(36).substr(2, 9),
+            emoji: data.emoji,
+            userId: data.userId
+          };
+          setReactions(prev => [...prev, newReaction]);
 
-          if (!sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
-            try {
-              sourceBuffer.appendBuffer(await blob.arrayBuffer());
-            } catch (e) {
-              if (e instanceof DOMException && e.name === 'InvalidStateError') {
-                console.warn(`Ignored InvalidStateError for ${socketId} (likely cleanup race condition)`);
-              } else {
-                console.error(`Error appending buffer for ${socketId}`, e);
-              }
-            }
+          // Cleanup after animation (2s)
+          setTimeout(() => {
+            setReactions(prev => prev.filter(r => r.id !== newReaction.id));
+          }, 2000);
+        });
+
+        socket.on('chat-error', (data: { message: string }) => {
+          console.error('[ChatDebug] Chat error received:', data.message);
+          if (data.message.includes('Room not found') || data.message.includes('Participant not found')) {
+            console.log('[ChatDebug] Room/Participant missing on server. Attempting to re-join...');
+            socket.emit('join-room', {
+              roomId,
+              username,
+              avatar_url: session.user?.image,
+              hasVideo: localVideoOn,
+              isMuted: isMuted
+            });
+            // Optional: Retry sending the message after a short delay?
+            // For now, just let the user retry or rely on the next message.
           } else {
-            if (!chunkQueueRef.current[socketId]) {
-              chunkQueueRef.current[socketId] = [];
-            }
-            chunkQueueRef.current[socketId].push(blob);
+            alert(`채팅 전송 실패: ${data.message}`);
           }
         });
 
-      socket.on('mic-state-changed', (data: { userId: string; isMuted: boolean }) => {
-        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
-      });
+        socket.on('disconnect', (reason) => {
+          console.log('Client: Disconnected from WebSocket server', reason);
+        });
+        socket.on('connect_error', (error) => {
+          console.error('Client: WebSocket connection error', error);
+        });
 
-      socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
-        console.log(`[Client] Camera state changed for ${data.userId}: ${data.hasVideo}`);
-        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p));
-      });
+        socket.on('error', (data: { message: string }) => {
+          console.error('Client: Socket error:', data.message);
+          alert(data.message);
+          router.push('/');
+        });
+      };
 
-      socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
-        setChatMessages(prev => [...prev, data]);
-      });
+      initialize();
 
-      socket.on('meeting-title-updated', (data: { title: string }) => {
-        setMeetingTitle(data.title);
-      });
+      return () => {
+        console.log('Client: useEffect cleanup');
+        mediaRecorderRef.current?.stop();
+        localStreamRef.current?.getTracks().forEach(track => track.stop());
 
-      socket.on('reaction-received', (data: { userId: string; emoji: string }) => {
-        const newReaction: Reaction = {
-          id: Math.random().toString(36).substr(2, 9),
-          emoji: data.emoji,
-          userId: data.userId
-        };
-        setReactions(prev => [...prev, newReaction]);
-
-        // Cleanup after animation (2s)
-        setTimeout(() => {
-          setReactions(prev => prev.filter(r => r.id !== newReaction.id));
-        }, 2000);
-      });
-
-      socket.on('chat-error', (data: { message: string }) => {
-        console.error('[ChatDebug] Chat error received:', data.message);
-        if (data.message.includes('Room not found') || data.message.includes('Participant not found')) {
-          console.log('[ChatDebug] Room/Participant missing on server. Attempting to re-join...');
-          socket.emit('join-room', {
-            roomId,
-            username,
-            avatar_url: session.user?.image,
-            hasVideo: localVideoOn,
-            isMuted: isMuted
-          });
-          // Optional: Retry sending the message after a short delay?
-          // For now, just let the user retry or rely on the next message.
-        } else {
-          alert(`채팅 전송 실패: ${data.message}`);
+        // Cleanup Audio Context
+        if (audioContextRef.current) {
+          audioContextRef.current.close();
         }
-      });
 
-      socket.on('disconnect', (reason) => {
-        console.log('Client: Disconnected from WebSocket server', reason);
-      });
-      socket.on('connect_error', (error) => {
-        console.error('Client: WebSocket connection error', error);
-      });
+        Object.keys(mediaSourcesRef.current).forEach(socketId => {
+          cleanupMediaSource(socketId);
+        });
 
-      socket.on('error', (data: { message: string }) => {
-        console.error('Client: Socket error:', data.message);
-        alert(data.message);
-        router.push('/');
-      });
-    };
-
-    initialize();
-
-    return () => {
-      console.log('Client: useEffect cleanup');
-      mediaRecorderRef.current?.stop();
-      localStreamRef.current?.getTracks().forEach(track => track.stop());
-
-      // Cleanup Audio Context
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
-
-      Object.keys(mediaSourcesRef.current).forEach(socketId => {
-        cleanupMediaSource(socketId);
-      });
-
-      socket.emit('leave-room'); // Notify server immediately on unmount
-      socket.disconnect();
-      socketRef.current = null;
-      socketIdToUserIdMap.current = {};
-      setParticipants([]);
-      isInitialized.current = false; // Allow re-initialization on remount
-    };
-  }, [roomId, router, session, status]);
+        socket.emit('leave-room'); // Notify server immediately on unmount
+        socket.disconnect();
+        socketRef.current = null;
+        socketIdToUserIdMap.current = {};
+        setParticipants([]);
+        isInitialized.current = false; // Allow re-initialization on remount
+      };
+    }, [roomId, router, session, status]);
 
   // Handle browser tab close / refresh
   useEffect(() => {
