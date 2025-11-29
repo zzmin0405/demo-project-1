@@ -311,6 +311,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, isMuted: data.isMuted } : p));
       });
 
+      socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
+        console.log('[Camera State] Received update:', data);
+        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p));
+      });
+
       socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
         setChatMessages(prev => [...prev, data]);
       });
@@ -506,7 +511,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     if (videoElement) {
       videoElement.src = URL.createObjectURL(mediaSource);
-      videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
+
+      const playVideo = () => {
+        if (videoElement.paused) {
+          videoElement.play()
+            .then(() => console.log(`[Playback] Started for ${userId}`))
+            .catch(e => console.warn(`[Playback] Autoplay failed for ${userId}:`, e));
+        }
+      };
+
+      videoElement.onloadedmetadata = playVideo;
+      videoElement.oncanplay = playVideo;
+
+      // Try playing immediately just in case
+      playVideo();
     }
 
     mediaSource.addEventListener('sourceopen', () => {
@@ -698,7 +716,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     socketRef.current?.emit('camera-state-changed', {
       roomId,
-      userId: session?.user?.email,
+      userId: (session?.user as any)?.id || session?.user?.email,
       hasVideo: videoTrack.enabled,
     });
     console.log(`[toggleCamera] Emitted camera-state-changed: ${videoTrack.enabled}`);
@@ -716,7 +734,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     socketRef.current?.emit('mic-state-changed', {
       roomId,
-      userId: session?.user?.email,
+      userId: (session?.user as any)?.id || session?.user?.email,
       isMuted: newMutedState
     });
   };
@@ -855,7 +873,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             />
           ) : (
             <video
-              ref={el => { if (participant.userId) remoteVideoRefs.current[participant.userId] = el; }}
+              ref={el => {
+                if (participant.userId) {
+                  remoteVideoRefs.current[participant.userId] = el;
+                  // Attempt to play if stream is already attached
+                  if (el && el.paused && el.srcObject) {
+                    el.play().catch(e => console.warn("Ref play failed", e));
+                  }
+                }
+              }}
               autoPlay
               playsInline
               className={cn("w-full h-full object-contain", participant.hasVideo ? 'block' : 'hidden')}

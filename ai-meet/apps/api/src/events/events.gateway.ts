@@ -481,4 +481,19 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       emoji: data.emoji
     });
   }
+
+  @SubscribeMessage('media-chunk')
+  handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string } | any): void {
+    const roomId = Array.from(client.rooms).find(r => r !== client.id);
+    if (roomId) {
+      const chunk = payload.chunk || payload;
+      const mimeType = payload.mimeType || 'video/webm; codecs="vp8, opus"';
+
+      client.to(roomId).emit('media-chunk', {
+        socketId: client.id,
+        chunk: chunk,
+        mimeType: mimeType
+      });
+    }
+  }
 }
