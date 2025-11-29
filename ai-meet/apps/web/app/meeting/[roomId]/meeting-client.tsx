@@ -91,6 +91,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const chunkQueueRef = useRef<{ [socketId: string]: Blob[] }>({});
   const initSegmentRef = useRef<Blob | null>(null);
   const hasReceivedInitSegmentRef = useRef<{ [socketId: string]: boolean }>({});
+  const remoteMimeTypesRef = useRef<{ [socketId: string]: string }>({});
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
   const [showEndCallModal, setShowEndCallModal] = useState(false);
@@ -136,7 +137,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           socketRef.current?.emit('media-chunk', {
             chunk: event.data,
             socketId: socketRef.current.id,
-            isInit: isFirstChunk
+            isInit: isFirstChunk,
+            mimeType: mediaRecorder.mimeType
           });
           isFirstChunk = false;
         }
@@ -183,10 +185,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
-  const setupMediaSource = (userId: string, socketId: string) => {
+  const setupMediaSource = (userId: string, socketId: string, mimeType: string = 'video/webm; codecs=vp8,opus') => {
     if (mediaSourcesRef.current[socketId]) return;
 
-    console.log(`Setting up MediaSource for ${userId}`);
+    console.log(`Setting up MediaSource for ${userId} with mimeType: ${mimeType}`);
     const mediaSource = new MediaSource();
     mediaSourcesRef.current[socketId] = mediaSource;
 
@@ -198,8 +200,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     mediaSource.addEventListener('sourceopen', () => {
       try {
-        if (MediaSource.isTypeSupported('video/webm; codecs=vp8,opus')) {
-          const sourceBuffer = mediaSource.addSourceBuffer('video/webm; codecs=vp8,opus');
+        if (MediaSource.isTypeSupported(mimeType)) {
+          const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
           sourceBuffersRef.current[socketId] = sourceBuffer;
 
           sourceBuffer.addEventListener('updateend', () => {
@@ -207,9 +209,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           });
           sourceBuffer.addEventListener('error', (e) => {
             console.error('SourceBuffer error:', e);
+            if (videoElement && videoElement.error) {
+              console.error("Video Element Error:", videoElement.error);
+            }
+            console.error("MediaSource ReadyState:", mediaSource.readyState);
           });
         } else {
-          console.error('VP8/Opus not supported');
+          console.error(`MimeType ${mimeType} not supported`);
         }
       } catch (e) {
         console.error('Error adding source buffer:', e);
@@ -458,12 +464,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer, isInit?: boolean }) => {
-        const { socketId, chunk, isInit } = data;
+      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer, isInit?: boolean, mimeType?: string }) => {
+        const { socketId, chunk, isInit, mimeType } = data;
 
         if (isInit) {
-          console.log(`Received Init Segment from ${socketId}`);
+          console.log(`Received Init Segment from ${socketId} with mimeType: ${mimeType}`);
           hasReceivedInitSegmentRef.current[socketId] = true;
+          if (mimeType) {
+            remoteMimeTypesRef.current[socketId] = mimeType;
+          }
         }
 
         if (!hasReceivedInitSegmentRef.current[socketId]) {
@@ -471,12 +480,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           return;
         }
 
-        const blob = new Blob([chunk], { type: 'video/webm; codecs=vp8,opus' });
+        const currentMimeType = remoteMimeTypesRef.current[socketId] || 'video/webm; codecs=vp8,opus';
+        const blob = new Blob([chunk], { type: currentMimeType });
 
         if (!mediaSourcesRef.current[socketId]) {
           const userId = socketIdToUserIdMap.current[socketId];
           if (userId) {
-            setupMediaSource(userId, socketId);
+            setupMediaSource(userId, socketId, currentMimeType);
           }
         }
 
