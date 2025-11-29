@@ -130,6 +130,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     if (mediaRecorderRef.current) {
       mediaRecorderRef.current.stop();
     }
+    initSegmentRef.current = null; // Reset Init Segment for new stream
+
     if (socketRef.current && stream) {
       const options = { mimeType: 'video/webm; codecs=vp8,opus' };
       try {
