@@ -957,6 +957,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   <ParticipantCard
                     participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
                     isLocal={true}
+                    localVideoOn={localVideoOn}
+                    localStream={localStream}
+                    setLocalVideoRef={(el) => { localVideoRef.current = el; }}
                     className="w-full h-full rounded-none border-0"
                   />
                 )}
@@ -968,6 +971,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     <ParticipantCard
                       participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
                       isLocal={true}
+                      localVideoOn={localVideoOn}
+                      localStream={localStream}
+                      setLocalVideoRef={(el) => { localVideoRef.current = el; }}
                       className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
                     />
                   )}
@@ -998,7 +1004,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 localVideoOn={localVideoOn}
                 localStream={localStream}
                 isMuted={isMuted}
-                setLocalVideoRef={setLocalVideoRef}
+                setLocalVideoRef={(el) => { localVideoRef.current = el; }}
               />
               {participants.map(p => (
                 <ParticipantCard
