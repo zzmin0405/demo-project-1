@@ -123,7 +123,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
 
 
-  private leaveRoom(client: Socket) {
+  private leaveRoom(client: Socket, silent: boolean = false) {
     for (const [roomId, users] of this.roomToUsers.entries()) {
       if (users.has(client.id)) {
         const leavingUser = users.get(client.id)!;
@@ -150,8 +150,12 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             this.userIdToRoom.delete(leavingUser.userId);
           }
 
-          this.server.to(roomId).emit('user-left', { userId: leavingUser.userId });
-          console.log(`Client ${leavingUser.userId} left room ${roomId}`);
+          if (!silent) {
+            this.server.to(roomId).emit('user-left', { userId: leavingUser.userId });
+            console.log(`Client ${leavingUser.userId} left room ${roomId}`);
+          } else {
+            console.log(`Client ${leavingUser.userId} left room ${roomId} (Silent/Auto-Kick)`);
+          }
 
           // DB Sync: Update leftAt
           this.prisma.participant.updateMany({
@@ -203,7 +207,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
             const oldSocket = this.server.sockets.sockets.get(oldSocketId);
             if (oldSocket) {
-              this.leaveRoom(oldSocket);
+              this.leaveRoom(oldSocket, true); // Silent leave to prevent user-left race condition
               oldSocket.emit('error', { message: '새로운 접속이 감지되어 연결이 종료되었습니다.' });
               oldSocket.disconnect(true);
             } else {

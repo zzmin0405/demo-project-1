@@ -260,13 +260,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         console.log(`Client: New user ${data.username} joined with socketId ${data.socketId}.`);
         if (data.userId === currentUserId) return;
 
+        // Cleanup if user already exists (Ghost/Re-join)
+        const oldSocketId = userIdToSocketIdMap.current[data.userId];
+        if (oldSocketId) {
+          console.log(`[UserJoined] Cleaning up stale resources for ${data.userId} (Old Socket: ${oldSocketId})`);
+          cleanupMediaSource(oldSocketId);
+          delete socketIdToUserIdMap.current[oldSocketId];
+        }
+
         const newParticipant = { ...data };
 
         // Populate maps immediately
         socketIdToUserIdMap.current[data.socketId] = data.userId;
         userIdToSocketIdMap.current[data.userId] = data.socketId;
 
-        setParticipants(prev => [...prev, newParticipant]);
+        setParticipants(prev => {
+          // Remove existing entry for this userId to prevent duplicates
+          const filtered = prev.filter(p => p.userId !== data.userId);
+          return [...filtered, newParticipant];
+        });
 
         // Restart MediaRecorder to send a fresh Init Segment (Keyframe) to the new user
         if (localStreamRef.current && localVideoOn) {
