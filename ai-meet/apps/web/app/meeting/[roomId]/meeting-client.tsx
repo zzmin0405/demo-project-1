@@ -1094,27 +1094,24 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
 
   return (
-    <div className="fixed inset-0 bg-background text-foreground overflow-hidden">
+    <div
+      className="fixed inset-0 bg-background text-foreground overflow-hidden"
+      onClick={() => {
+        if (showControls) {
+          setShowControls(false);
+          if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+        } else {
+          setShowControls(true);
+          resetControlsTimer();
+        }
+      }}
+      onMouseMove={() => {
+        if (showControls) {
+          resetControlsTimer();
+        }
+      }}
+    >
       <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row h-full">
-        {/* Click Handler Overlay for Controls Toggle */}
-        <div
-          className="absolute inset-0 z-0"
-          onClick={() => {
-            if (showControls) {
-              setShowControls(false);
-              if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
-            } else {
-              setShowControls(true);
-              resetControlsTimer();
-            }
-          }}
-          onMouseMove={() => {
-            if (showControls) {
-              resetControlsTimer();
-            }
-          }}
-        />
-
         <main className="flex-1 bg-neutral-900 relative p-4 pb-20 md:pb-4 flex items-center justify-center transition-all duration-300 overflow-hidden group min-h-0">
 
           {/* Top Bar (View Switcher & Title) */}
@@ -1183,10 +1180,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           {/* Main Video Grid */}
           <div className={cn(
             "w-full h-full grid gap-2 p-2 md:gap-4 md:p-4 pt-14 min-h-0",
-            layoutMode === 'speaker' ? "grid-cols-1 grid-rows-1" : "auto-rows-fr",
-            layoutMode === 'grid' && (participants.length + 1) === 1 && "flex items-center justify-center", // Single user centered
-            layoutMode === 'grid' && (participants.length + 1) === 2 && "grid-cols-1 md:grid-cols-2",
-            layoutMode === 'grid' && (participants.length + 1) >= 3 && "grid-cols-2 md:grid-cols-3",
+            layoutMode === 'speaker' ? "grid-cols-1 grid-rows-1" : "auto-rows-[1fr]",
+            layoutMode === 'grid' && (participants.length + 1) === 1 && "grid-cols-1 grid-rows-1", // 1 User: Full screen
+            layoutMode === 'grid' && (participants.length + 1) === 2 && "grid-cols-1 md:grid-cols-2", // 2 Users: Stacked (Mobile) / Side-by-side (Desktop)
+            layoutMode === 'grid' && (participants.length + 1) === 3 && "grid-cols-1 md:grid-cols-2", // 3 Users: Stacked (Mobile) / 2x2 (Desktop)
+            layoutMode === 'grid' && (participants.length + 1) >= 4 && "grid-cols-2 md:grid-cols-2", // 4+ Users: 2x2 Grid
           )}>
 
             {/* Local User */}
@@ -1311,10 +1309,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         </main>
 
         {/* Chat Panel (Responsive) */}
-        <div className={cn(
-          "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
-          showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
-        )}>
+        <div
+          className={cn(
+            "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
+            showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
+          )}
+          onClick={(e) => e.stopPropagation()}
+        >
           <ChatPanel
             messages={chatMessages}
             currentUserId={(session?.user as any)?.id || session?.user?.email}
