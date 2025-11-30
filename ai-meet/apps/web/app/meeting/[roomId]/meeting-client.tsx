@@ -299,6 +299,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             }
           }
 
+          if (userId === currentUserId) {
+            console.warn(`[MediaChunk] Ignored loopback chunk from self (socketId: ${socketId})`);
+            return;
+          }
+
           if (userId) {
             setupMediaSource(userId, socketId, mimeType);
           } else {

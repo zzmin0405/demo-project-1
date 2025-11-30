@@ -168,48 +168,37 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = client['user'].sub; // Use the trusted userId from the guard
 
     // Single Meeting Enforcement with Auto-Kick
+    // Single Meeting Enforcement with Auto-Kick
     const existingRoomId = this.userIdToRoom.get(userId);
-    if (existingRoomId && existingRoomId !== roomId) {
-      console.log(`User ${userId} is switching from room ${existingRoomId} to ${roomId}. Initiating auto-kick.`);
+    if (existingRoomId) {
+      console.log(`User ${userId} is already in room ${existingRoomId}. Checking for stale sockets...`);
 
-      // 1. Find the old socket(s) for this user in the existing room
       const existingRoom = this.roomToUsers.get(existingRoomId);
       if (existingRoom) {
         for (const [oldSocketId, participant] of existingRoom.entries()) {
           if (participant.userId === userId) {
-            // Safety Check: If the "old" socket is actually the CURRENT socket, do not disconnect it!
-            // This can happen if the client reconnected quickly or if there's a race condition.
-            if (oldSocketId === client.id) {
-              console.log(`[Auto-Kick] Detected current socket ${client.id} in old room ${existingRoomId}. Removing from old room without disconnect.`);
-              existingRoom.delete(oldSocketId);
-              if (existingRoom.size === 0) {
-                this.roomToUsers.delete(existingRoomId);
-              }
-              // We don't delete userIdToRoom here because we are about to overwrite it or it will be handled below.
-              continue;
-            }
+            // If it's the SAME socket, ignore (re-join)
+            if (oldSocketId === client.id) continue;
 
-            // 2. Force leave for the old socket
+            console.log(`[Auto-Kick] Found stale socket ${oldSocketId} for user ${userId} in room ${existingRoomId}. Disconnecting.`);
+
             const oldSocket = this.server.sockets.sockets.get(oldSocketId);
             if (oldSocket) {
               this.leaveRoom(oldSocket);
-              oldSocket.emit('error', { message: '새로운 회의에 참여하여 기존 회의에서 퇴장되었습니다.' });
+              oldSocket.emit('error', { message: '새로운 접속이 감지되어 연결이 종료되었습니다.' });
               oldSocket.disconnect(true);
-              console.log(`[Auto-Kick] Disconnected old socket ${oldSocketId} for user ${userId}`);
             } else {
-              // Socket not found in server (already disconnected but not cleaned up?)
-              // Manually cleanup maps
+              // Manually cleanup if socket object is gone
               existingRoom.delete(oldSocketId);
-              if (existingRoom.size === 0) {
-                this.roomToUsers.delete(existingRoomId);
-              }
-              this.userIdToRoom.delete(userId);
-              console.log(`[Auto-Kick] Cleaned up stale state for socket ${oldSocketId} (user ${userId})`);
+              if (existingRoom.size === 0) this.roomToUsers.delete(existingRoomId);
+              // Don't delete userIdToRoom yet if we are staying in the same room
             }
           }
         }
-      } else {
-        // Room doesn't exist but mapping does
+      }
+
+      // If switching rooms, update mapping
+      if (existingRoomId !== roomId) {
         this.userIdToRoom.delete(userId);
       }
     }
