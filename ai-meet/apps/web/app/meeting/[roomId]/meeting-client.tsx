@@ -1060,6 +1060,40 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, []);
 
+  // Auto-hide controls logic
+  const autoHideTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isHoveringControlsRef = useRef(false);
+
+  const startAutoHideTimer = useCallback(() => {
+    if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+    if (isHoveringControlsRef.current) return; // Don't hide if hovering
+
+    autoHideTimerRef.current = setTimeout(() => {
+      setShowControls(false);
+    }, 3000);
+  }, []);
+
+  useEffect(() => {
+    if (showControls) {
+      startAutoHideTimer();
+    } else {
+      if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+    }
+    return () => {
+      if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+    };
+  }, [showControls, startAutoHideTimer]);
+
+  const handleControlsMouseEnter = () => {
+    isHoveringControlsRef.current = true;
+    if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+  };
+
+  const handleControlsMouseLeave = () => {
+    isHoveringControlsRef.current = false;
+    if (showControls) startAutoHideTimer();
+  };
+
   return (
     <div
       className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
@@ -1072,12 +1106,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     >
 
       {/* Top Bar (View Switcher) */}
-      < div className={
-        cn(
+      <div
+        onMouseEnter={handleControlsMouseEnter}
+        onMouseLeave={handleControlsMouseLeave}
+        className={cn(
           "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
           showControls ? "translate-y-0" : "-translate-y-full"
-        )
-      } >
+        )}
+      >
         <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
           {isEditingTitle ? (
             <Input
@@ -1243,7 +1279,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       </div >
 
       {/* Control Bar Toggle Button (Desktop Only) */}
-      < div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 hidden md:flex flex-col items-center gap-4"
+      < div
+        onMouseEnter={handleControlsMouseEnter}
+        onMouseLeave={handleControlsMouseLeave}
+        className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 hidden md:flex flex-col items-center gap-4"
         style={{ bottom: showControls ? '80px' : '20px' }}>
 
         {showControls && (
