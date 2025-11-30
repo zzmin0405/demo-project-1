@@ -321,7 +321,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         socketIdToUserIdMap.current[socketId] = userId;
         userIdToSocketIdMap.current[userId] = socketId;
 
-        if (!mediaSourcesRef.current[socketId]) {
+        if (!mediaSourcesRef.current[socketId] || mediaSourcesRef.current[socketId].readyState === 'closed') {
+          if (mediaSourcesRef.current[socketId]) {
+            console.log(`[MediaChunk] MediaSource for ${socketId} is closed, recreating...`);
+            cleanupMediaSource(socketId);
+          }
           setupMediaSource(userId, socketId, mimeType);
         }
 
