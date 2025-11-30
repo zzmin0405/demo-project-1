@@ -1,14 +1,14 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import Header from "@/components/header";
 import { Providers } from "@/components/providers";
+import Header from "@/components/header";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "AI-Meet",
-  description: "Real-time multilingual meeting platform",
+  title: "AI Meet - Real-time multilingual meeting platform",
+  description: "Real-time meeting platform with AI translation",
 };
 
 export default function RootLayout({
@@ -20,7 +20,10 @@ export default function RootLayout({
     <html lang="en">
       <body className={inter.className}>
         <Providers>
-          {children}
+          <Header />
+          <main className="container mx-auto p-4">
+            {children}
+          </main>
         </Providers>
       </body>
     </html>

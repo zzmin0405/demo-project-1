@@ -1,0 +1,16 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/meeting/[roomId]/leave/route": "app/api/meeting/[roomId]/leave/route.js",
+  "/api/auth/[...nextauth]/route": "app/api/auth/[...nextauth]/route.js",
+  "/api/meeting/[roomId]/route": "app/api/meeting/[roomId]/route.js",
+  "/api/meeting/my/route": "app/api/meeting/my/route.js",
+  "/api/meeting/route": "app/api/meeting/route.js",
+  "/api/meeting/validate/route": "app/api/meeting/validate/route.js",
+  "/api/user/profile/route": "app/api/user/profile/route.js",
+  "/api/upload/route": "app/api/upload/route.js",
+  "/favicon.ico/route": "app/favicon.ico/route.js",
+  "/meeting/[roomId]/page": "app/meeting/[roomId]/page.js",
+  "/(main)/mypage/page": "app/(main)/mypage/page.js",
+  "/(main)/login/page": "app/(main)/login/page.js",
+  "/(main)/page": "app/(main)/page.js"
+}

@@ -1,0 +1,16 @@
+{
+  "/_not-found/page": "/_not-found",
+  "/api/meeting/[roomId]/leave/route": "/api/meeting/[roomId]/leave",
+  "/api/auth/[...nextauth]/route": "/api/auth/[...nextauth]",
+  "/api/meeting/[roomId]/route": "/api/meeting/[roomId]",
+  "/api/meeting/my/route": "/api/meeting/my",
+  "/api/meeting/route": "/api/meeting",
+  "/api/meeting/validate/route": "/api/meeting/validate",
+  "/api/user/profile/route": "/api/user/profile",
+  "/api/upload/route": "/api/upload",
+  "/favicon.ico/route": "/favicon.ico",
+  "/meeting/[roomId]/page": "/meeting/[roomId]",
+  "/(main)/mypage/page": "/mypage",
+  "/(main)/login/page": "/login",
+  "/(main)/page": "/"
+}
