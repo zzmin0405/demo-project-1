@@ -1092,7 +1092,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   // --- Render Logic ---
   const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
   const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
-
   return (
     <div
       className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
@@ -1101,20 +1100,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           resetControlsTimer();
         }
       }}
-      onClick={(e) => {
-        // Only toggle if clicking the main container, not buttons or controls
-        if (e.target === e.currentTarget || (e.target as HTMLElement).closest('.participant-card')) {
-          if (showControls) {
-            setShowControls(false);
-            if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
-          } else {
-            setShowControls(true);
-            resetControlsTimer();
-          }
+      onClick={() => {
+        if (showControls) {
+          setShowControls(false);
+          if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+        } else {
+          setShowControls(true);
+          resetControlsTimer();
         }
       }}
     >
-
 
       {/* Main Video Grid */}
       <div className={cn(
@@ -1173,6 +1168,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
           showControls ? "translate-y-0" : "-translate-y-full"
         )}
+        onClick={(e) => e.stopPropagation()}
       >
         <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
           {isEditingTitle ? (
@@ -1198,14 +1194,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               {meetingTitle}
             </span>
           )}
-          {isHost && !isEditingTitle && (
-            <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
-              setTempTitle(meetingTitle);
-              setIsEditingTitle(true);
-            }} />
-          )}
+          {
+            isHost && !isEditingTitle && (
+              <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
+                setTempTitle(meetingTitle);
+                setIsEditingTitle(true);
+              }} />
+            )
+          }
           <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
-        </div>
+        </div >
         <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
           <Button
             variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
@@ -1224,20 +1222,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
           </Button>
         </div>
-      </div>
+      </div >
 
       {/* Control Bar - Responsive (Fixed Bottom on Mobile, Floating Pill on Desktop) */}
-      <div
+      < div
         onMouseEnter={handleControlsMouseEnter}
         onMouseLeave={handleControlsMouseLeave}
-        className={cn(
-          "fixed z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-2 md:space-x-4 shadow-2xl",
-          // Mobile Styles: Bottom fixed, full width, black background
-          "bottom-0 left-0 right-0 h-16 bg-black border-t border-white/10 rounded-none px-4",
-          // Desktop Styles: Floating pill, centered, rounded
-          "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:h-auto md:bg-black/80 md:backdrop-blur-xl md:border md:rounded-full md:px-6 md:py-3 md:w-auto",
-          showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
-        )}
+        className={
+          cn(
+            "fixed z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-2 md:space-x-4 shadow-2xl",
+            // Mobile Styles: Bottom fixed, full width, black background
+            "bottom-0 left-0 right-0 h-16 bg-black border-t border-white/10 rounded-none px-4",
+            // Desktop Styles: Floating pill, centered, rounded
+            "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:h-auto md:bg-black/80 md:backdrop-blur-xl md:border md:rounded-full md:px-6 md:py-3 md:w-auto",
+            showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
+          )
+        }
         onClick={(e) => e.stopPropagation()}
       >
         <Button
@@ -1278,14 +1278,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         >
           End
         </Button>
-      </div>
+      </div >
 
 
       {/* Chat Panel (Responsive) */}
-      <div className={cn(
-        "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
-        showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
-      )}>
+      < div className={
+        cn(
+          "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
+          showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
+        )
+      } >
         <ChatPanel
           messages={chatMessages}
           currentUserId={(session?.user as any)?.id || session?.user?.email}
@@ -1294,7 +1296,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           onSendMessage={sendMessage}
           onClose={() => setShowChatPanel(false)}
         />
-      </div>
+      </div >
 
       {/* Participants Panel (Modal) */}
       {
