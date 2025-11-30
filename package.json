@@ -11,5 +11,8 @@
       "sharp",
       "unrs-resolver"
     ]
+  },
+  "devDependencies": {
+    "debug": "^4.4.3"
   }
 }

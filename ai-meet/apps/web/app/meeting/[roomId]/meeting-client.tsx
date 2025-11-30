@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
 import { useSession } from "next-auth/react";
@@ -300,38 +300,29 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('media-chunk', async (data: { socketId: string, userId?: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
         const { socketId, chunk, mimeType = 'video/webm; codecs="vp8, opus"' } = data;
-        // console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength || chunk.length}`); // Uncomment for verbose debugging
+        const userId = data.userId;
+        console.log(`[MediaChunk] Received from ${socketId} (User: ${userId}), size: ${chunk.byteLength || chunk.length}`);
         const blob = new Blob([chunk], { type: mimeType });
 
-        // Use userId from payload if available (Authoritative), otherwise fallback to map
-        let userId = data.userId || socketIdToUserIdMap.current[socketId];
+        // STRICT IDENTITY CHECK: Only use userId from payload.
+        // If the server didn't send a userId, we cannot trust this chunk.
+
+        if (!userId) {
+          // console.warn(`[MediaChunk] Dropping chunk from ${socketId} (No userId in payload)`);
+          return;
+        }
+
+        if (userId === currentUserId) {
+          // console.warn(`[MediaChunk] Ignored loopback chunk from self (socketId: ${socketId})`);
+          return;
+        }
+
+        // Update map for reference, but rely on payload userId
+        socketIdToUserIdMap.current[socketId] = userId;
+        userIdToSocketIdMap.current[userId] = socketId;
 
         if (!mediaSourcesRef.current[socketId]) {
-          // Fallback: Try to find user in participants state if map is missing entry
-          if (!userId) {
-            const p = participants.find((p: any) => p.socketId === socketId);
-            if (p) {
-              console.log(`[MediaChunk] Recovered userId ${p.userId} from participants state for socket ${socketId}`);
-              userId = p.userId;
-            }
-          }
-
-          // Update map if we have a userId
-          if (userId) {
-            socketIdToUserIdMap.current[socketId] = userId;
-            userIdToSocketIdMap.current[userId] = socketId;
-          }
-
-          if (userId === currentUserId) {
-            console.warn(`[MediaChunk] Ignored loopback chunk from self (socketId: ${socketId})`);
-            return;
-          }
-
-          if (userId) {
-            setupMediaSource(userId, socketId, mimeType);
-          } else {
-            console.warn(`[MediaChunk] Unknown socketId: ${socketId}. Map size: ${Object.keys(socketIdToUserIdMap.current).length}`);
-          }
+          setupMediaSource(userId, socketId, mimeType);
         }
 
         // Re-check loopback for existing sources (Safety)
@@ -693,8 +684,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         : true;
 
       const audioConstraint: boolean | MediaTrackConstraints = selectedAudioInputDeviceId
-        ? { deviceId: { exact: selectedAudioInputDeviceId } }
-        : true;
+        ? {
+          deviceId: { exact: selectedAudioInputDeviceId },
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+        : {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        };
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: videoConstraint,
@@ -942,6 +942,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
   const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
 
+
+
+  const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
+    console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
+    if (userId && el) {
+      remoteVideoRefs.current[userId] = el;
+      const socketId = userIdToSocketIdMap.current[userId];
+      if (socketId && mediaSourcesRef.current[socketId]) {
+        // Always try to attach if src is missing, or just ensure it plays
+        if (!el.src) {
+          console.log(`[VideoRef] Attaching MediaSource to ${userId}`);
+          el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
+        }
+        // Ensure it's playing
+        el.play().catch(e => console.error(`[VideoRef] Autoplay failed for ${userId}`, e));
+      }
+    }
+  }, [participants]); // Re-create if participants change, but that's okay.
+
   return (
     <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative" >
 
@@ -1018,23 +1037,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl">
                 {mainSpeaker ? (
                   <ParticipantCard
+                    key={mainSpeaker.userId}
                     participant={mainSpeaker}
                     isPinned={mainSpeaker.userId === pinnedUserId}
                     className="w-full h-full rounded-none border-0"
-                    onRemoteVideoRef={(userId: string, el: HTMLVideoElement | null) => {
-                      if (userId) {
-                        remoteVideoRefs.current[userId] = el;
-                        const socketId = userIdToSocketIdMap.current[userId];
-                        if (socketId && mediaSourcesRef.current[socketId] && el && !el.src) {
-                          console.log(`[Late Attach] Attaching existing MediaSource to new video element for ${userId}`);
-                          el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
-                          el.onloadedmetadata = () => el.play().catch((e: any) => console.error("Autoplay failed", e));
-                        }
-                      }
-                    }}
+                    onRemoteVideoRef={handleRemoteVideoRef}
                   />
                 ) : (
                   <ParticipantCard
+                    key="local-main"
                     participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
                     isLocal={true}
                     localVideoOn={localVideoOn}
@@ -1063,17 +1074,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                       participant={p}
                       isPinned={p.userId === pinnedUserId}
                       className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
-                      onRemoteVideoRef={(userId: string, el: HTMLVideoElement | null) => {
-                        if (userId) {
-                          remoteVideoRefs.current[userId] = el;
-                          const socketId = userIdToSocketIdMap.current[userId];
-                          if (socketId && mediaSourcesRef.current[socketId] && el && !el.src) {
-                            console.log(`[Late Attach] Attaching existing MediaSource to new video element for ${userId}`);
-                            el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
-                            el.onloadedmetadata = () => el.play().catch((e: any) => console.error("Autoplay failed", e));
-                          }
-                        }
-                      }}
+                      onRemoteVideoRef={handleRemoteVideoRef}
                     />
                   ))}
                 </div>
@@ -1103,18 +1104,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   participant={p}
                   isPinned={p.userId === pinnedUserId}
                   onPin={(userId) => setPinnedUserId(pinnedUserId === userId ? null : userId)}
-                  onRemoteVideoRef={(userId: string, el: HTMLVideoElement | null) => {
-                    if (userId) {
-                      remoteVideoRefs.current[userId] = el;
-                      // Late Attach Logic: If MediaSource exists but video element has no src, attach it now
-                      const socketId = userIdToSocketIdMap.current[userId];
-                      if (socketId && mediaSourcesRef.current[socketId] && el && !el.src) {
-                        console.log(`[Late Attach] Attaching existing MediaSource to new video element for ${userId}`);
-                        el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
-                        el.onloadedmetadata = () => el.play().catch((e: any) => console.error("Autoplay failed", e));
-                      }
-                    }
-                  }}
+                  onRemoteVideoRef={handleRemoteVideoRef}
                 />
               ))}
             </div>
@@ -1122,20 +1112,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         </main>
 
         {/* Chat Panel (Right Sidebar) */}
-        {showChatPanel && (
-          <ChatPanel
-            messages={chatMessages}
-            currentUserId={(session?.user as any)?.id || session?.user?.email}
-            newMessage={newMessage}
-            onNewMessageChange={setNewMessage}
-            onSendMessage={sendMessage}
-            onClose={() => setShowChatPanel(false)}
-          />
-        )}
-      </div>
+        {
+          showChatPanel && (
+            <ChatPanel
+              messages={chatMessages}
+              currentUserId={(session?.user as any)?.id || session?.user?.email}
+              newMessage={newMessage}
+              onNewMessageChange={setNewMessage}
+              onSendMessage={sendMessage}
+              onClose={() => setShowChatPanel(false)}
+            />
+          )
+        }
+      </div >
 
       {/* Control Bar Toggle Button */}
-      <div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 flex flex-col items-center gap-4"
+      < div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 flex flex-col items-center gap-4"
         style={{ bottom: showControls ? '80px' : '20px' }}>
 
         {showControls && (
@@ -1150,13 +1142,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         >
           {showControls ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
         </Button>
-      </div>
+      </div >
 
       {/* Control Bar */}
-      <div className={cn(
-        "fixed bottom-0 left-0 right-0 h-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t z-40 transition-transform duration-300 ease-in-out flex items-center justify-center space-x-4",
-        showControls ? "translate-y-0" : "translate-y-full"
-      )}>
+      < div className={
+        cn(
+          "fixed bottom-0 left-0 right-0 h-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t z-40 transition-transform duration-300 ease-in-out flex items-center justify-center space-x-4",
+          showControls ? "translate-y-0" : "translate-y-full"
+        )
+      } >
         <Button
           variant={isMuted ? "destructive" : "secondary"}
           size="icon"
@@ -1201,7 +1195,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         >
           End Call
         </Button>
-      </div>
+      </div >
 
 
       {/* Participants Panel (Modal) */}

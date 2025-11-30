@@ -53,6 +53,7 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
             <div className="w-full h-full flex items-center justify-center bg-black/90">
                 {isLocal ? (
                     <video
+                        key="local-video"
                         ref={(el) => {
                             // Combine refs
                             if (setLocalVideoRef) setLocalVideoRef(el);
@@ -69,7 +70,14 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                     />
                 ) : (
                     <video
-                        ref={el => onRemoteVideoRef?.(participant.userId, el)}
+                        key="remote-video"
+                        ref={el => {
+                            if (el) {
+                                // CRITICAL FIX: Ensure no local stream is attached
+                                el.srcObject = null;
+                                onRemoteVideoRef?.(participant.userId, el);
+                            }
+                        }}
                         autoPlay
                         playsInline
                         className={cn("w-full h-full object-contain", participant.hasVideo ? 'block' : 'hidden')}

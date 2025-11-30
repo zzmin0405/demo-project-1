@@ -64,9 +64,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('media-chunk')
   handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string } | any): void {
     const roomId = Array.from(client.rooms).find(r => r !== client.id);
-    const userId = client['user']?.sub;
+    const userId = client['user']?.sub || client.handshake.auth.token;
 
-    // console.log(`[MediaChunkDebug] Received from ${client.id} (User: ${userId}) for Room ${roomId}`);
+    console.log(`[MediaChunkDebug] Received from ${client.id} (User: ${userId}) for Room ${roomId}`);
 
     if (roomId) {
       const chunk = payload.chunk || payload;
