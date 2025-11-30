@@ -267,6 +267,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         userIdToSocketIdMap.current[data.userId] = data.socketId;
 
         setParticipants(prev => [...prev, newParticipant]);
+
+        // Restart MediaRecorder to send a fresh Init Segment (Keyframe) to the new user
+        if (localStreamRef.current && localVideoOn) {
+          console.log(`[UserJoined] Restarting MediaRecorder to send fresh Init Segment to ${data.username}`);
+          setupMediaRecorder(localStreamRef.current);
+        }
       });
 
       socket.on('user-left', (data: { userId: string }) => {
