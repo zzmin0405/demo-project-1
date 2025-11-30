@@ -629,15 +629,41 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
           // Process queued chunks
           if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
-            const nextChunk = chunkQueueRef.current[socketId].shift();
+            const nextChunk = chunkQueueRef.current[socketId][0]; // Peek first
             if (nextChunk) {
               try {
-                sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
-              } catch (e) {
-                if (e instanceof DOMException && e.name === 'InvalidStateError') {
+                const buffer = await nextChunk.arrayBuffer();
+                sourceBuffer.appendBuffer(buffer);
+                chunkQueueRef.current[socketId].shift(); // Remove only on success (or handled error)
+              } catch (e: any) {
+                if (e.name === 'QuotaExceededError') {
+                  console.warn(`[Buffer] QuotaExceededError for ${socketId}. Aggressively pruning...`);
+                  if (sourceBuffer.buffered.length > 0) {
+                    const bufferStart = sourceBuffer.buffered.start(0);
+                    const currentTime = videoElement?.currentTime || bufferStart; // Use bufferStart if no video element
+                    // Remove everything up to 5 seconds before current time (or just first 10 seconds of buffer)
+                    const removeEnd = Math.max(bufferStart + 5, currentTime - 5);
+
+                    if (!sourceBuffer.updating) {
+                      try {
+                        sourceBuffer.remove(bufferStart, removeEnd);
+                        console.log(`[Buffer] Emergency prune: ${bufferStart} to ${removeEnd}`);
+                      } catch (pruneErr) {
+                        console.error(`[Buffer] Emergency prune failed`, pruneErr);
+                      }
+                    }
+                  }
+                  // Do NOT shift the chunk, retry later? 
+                  // Actually, if we remove, updateend will fire, and we can try again.
+                  // But we need to make sure we don't loop infinitely.
+                  // For now, let's drop the chunk if we can't append, to avoid stalling.
+                  chunkQueueRef.current[socketId].shift();
+                } else if (e instanceof DOMException && e.name === 'InvalidStateError') {
                   console.warn(`Ignored InvalidStateError in queue for ${socketId}`);
+                  chunkQueueRef.current[socketId].shift();
                 } else {
                   console.error(`Error appending queued buffer for ${socketId}`, e);
+                  chunkQueueRef.current[socketId].shift();
                 }
               }
             }
