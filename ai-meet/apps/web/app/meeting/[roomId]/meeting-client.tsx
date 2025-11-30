@@ -766,10 +766,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     socketRef.current?.emit('camera-state-changed', {
       roomId,
-      userId: session?.user?.email,
+      userId: currentUserId,
       hasVideo: videoTrack.enabled,
     });
-    console.log(`[toggleCamera] Emitted camera-state-changed: ${videoTrack.enabled}. localVideoOn state should update to: ${videoTrack.enabled}`);
+    console.log(`[toggleCamera] Emitted camera-state-changed for ${currentUserId}: ${videoTrack.enabled}`);
   };
 
   const toggleMute = () => {
@@ -784,7 +784,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     socketRef.current?.emit('mic-state-changed', {
       roomId,
-      userId: session?.user?.email,
+      userId: currentUserId,
       isMuted: newMutedState
     });
   };
