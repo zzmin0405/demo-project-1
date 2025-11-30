@@ -367,8 +367,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
-        console.log(`[Client] Camera state changed for ${data.userId}: ${data.hasVideo}`);
-        setParticipants(prev => prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p));
+        console.log(`[Client] Camera state changed for userId=${data.userId}, hasVideo=${data.hasVideo}, currentUserId=${currentUserId}`);
+        console.log(`[Client] Current participants:`, participants.map(p => ({ userId: p.userId, username: p.username, hasVideo: p.hasVideo })));
+        setParticipants(prev => {
+          const updated = prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p);
+          console.log(`[Client] Updated participants:`, updated.map(p => ({ userId: p.userId, username: p.username, hasVideo: p.hasVideo })));
+          return updated;
+        });
       });
 
       socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
@@ -833,6 +838,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       userId: currentUserId,
       hasVideo: videoTrack.enabled,
     });
+    console.log(`[toggleCamera] Emitted camera-state-changed: roomId=${roomId}, userId=${currentUserId}, hasVideo=${videoTrack.enabled}`);
     console.log(`[toggleCamera] Emitted camera-state-changed for ${currentUserId}: ${videoTrack.enabled}`);
   };
 
