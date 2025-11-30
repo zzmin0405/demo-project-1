@@ -999,66 +999,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const handleSendReaction = (emoji: string) => {
     socketRef.current?.emit('send-reaction', { roomId, emoji });
-    // Optimistically show reaction for self? 
-    // The server broadcasts to everyone including sender, so we can wait for that.
-    // Or we can show it immediately for better responsiveness.
-    // Let's rely on server broadcast for consistency for now.
   };
-
-  // --- UI Components ---
-
-  // --- Render Logic ---
-
-  const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
-  const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
-  const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
-
-  const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
-    console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
-    if (userId && el) {
-      remoteVideoRefs.current[userId] = el;
-      const socketId = userIdToSocketIdMap.current[userId];
-      if (socketId && mediaSourcesRef.current[socketId]) {
-        const mediaSource = mediaSourcesRef.current[socketId];
-        const currentUrl = mediaSourceUrlsRef.current[socketId];
-
-        // STRICT CHECK: Only skip if the element is playing the EXACT SAME Blob URL
-        if (el.src && el.src === currentUrl && mediaSource.readyState === 'open') {
-          console.log(`[VideoRef] Skipping re-attach for ${userId}, already playing correct blob: ${currentUrl}`);
-          return;
-        }
-
-        // Always clean up old Blob URL first
-        const oldSrc = el.src;
-        if (oldSrc && oldSrc.startsWith('blob:') && oldSrc !== currentUrl) {
-          URL.revokeObjectURL(oldSrc);
-          el.src = '';
-        }
-
-        if (mediaSource.readyState === 'closed') {
-          console.warn(`[VideoRef] MediaSource for ${userId} is closed, cleared stale src`);
-          return;
-        }
-
-        console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
-
-        // Create new URL if we don't have one or if we are re-attaching
-        let newUrl = currentUrl;
-        if (!newUrl) {
-          newUrl = URL.createObjectURL(mediaSource);
-          mediaSourceUrlsRef.current[socketId] = newUrl;
-        }
-
-        el.src = newUrl;
-
-        el.play().catch(e => {
-          if (e.name !== 'AbortError') {
-            console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
-          }
-        });
-      }
-    }
-  }, []);
 
   // Auto-hide controls logic
   const autoHideTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -1094,6 +1035,66 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     if (showControls) startAutoHideTimer();
   };
 
+  const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
+    console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
+    if (userId && el) {
+      remoteVideoRefs.current[userId] = el;
+      const socketId = userIdToSocketIdMap.current[userId];
+
+      if (socketId && mediaSourcesRef.current[socketId]) {
+        const mediaSource = mediaSourcesRef.current[socketId];
+        const currentUrl = mediaSourceUrlsRef.current[socketId];
+
+        // STRICT CHECK: Only skip if the element is playing the EXACT SAME Blob URL
+        if (el.src && el.src === currentUrl && mediaSource.readyState === 'open') {
+          console.log(`[VideoRef] Skipping re-attach for ${userId}, already playing correct blob: ${currentUrl}`);
+          return;
+        }
+
+        // Always clean up old Blob URL first
+        const oldSrc = el.src;
+        if (oldSrc && oldSrc.startsWith('blob:') && oldSrc !== currentUrl) {
+          URL.revokeObjectURL(oldSrc);
+          el.src = '';
+        }
+
+        if (mediaSource.readyState === 'closed') {
+          console.warn(`[VideoRef] MediaSource for ${userId} is closed, triggering FULL cleanup`);
+          cleanupMediaSource(socketId);
+          return;
+        }
+
+        console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
+
+        // Create new URL if we don't have one or if we are re-attaching
+        let newUrl = currentUrl;
+        if (!newUrl) {
+          newUrl = URL.createObjectURL(mediaSource);
+          mediaSourceUrlsRef.current[socketId] = newUrl;
+        }
+
+        el.src = newUrl;
+
+        // Error Recovery Listener
+        const errorHandler = (e: Event) => {
+          console.error(`[VideoRef] Video error for ${userId}:`, (e.target as HTMLVideoElement).error);
+          cleanupMediaSource(socketId); // Force cleanup to allow recreation on next chunk
+        };
+        el.addEventListener('error', errorHandler, { once: true });
+
+        el.play().catch(e => {
+          if (e.name !== 'AbortError') {
+            console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
+          }
+        });
+      }
+    }
+  }, []);
+
+  // --- Render Logic ---
+  const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
+  const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
+
   return (
     <div
       className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
@@ -1104,6 +1105,56 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       }}
     >
+
+
+      {/* Main Video Grid */}
+      <div className={cn(
+        "flex-1 w-full h-full p-4 transition-all duration-500 ease-in-out",
+        layoutMode === 'speaker' ? "flex items-center justify-center relative" : "grid gap-4 auto-rows-fr",
+        layoutMode === 'grid' && (participants.length + 1) === 1 && "flex items-center justify-center",
+        layoutMode === 'grid' && (participants.length + 1) === 2 && "grid-cols-1 md:grid-cols-2",
+        layoutMode === 'grid' && (participants.length + 1) >= 3 && "grid-cols-2 md:grid-cols-3",
+      )}>
+
+        {/* Local User */}
+        <div className={cn(
+          "relative transition-all duration-500 ease-in-out overflow-hidden rounded-xl shadow-lg border border-white/10 bg-black/40",
+          layoutMode === 'speaker' ? (
+            mainSpeaker?.userId === currentUserId
+              ? "w-full h-full max-w-5xl aspect-video z-10" // Local user is main speaker
+              : "absolute bottom-24 right-4 w-48 h-36 z-30" // Local user is PIP
+          ) : "w-full h-full" // Grid mode
+        )}>
+          <ParticipantCard
+            participant={{ userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn }}
+            isLocal={true}
+            localStream={localStreamRef.current}
+            localVideoOn={localVideoOn}
+            isPinned={pinnedUserId === currentUserId}
+            onPin={() => setPinnedUserId(pinnedUserId === currentUserId ? null : currentUserId)}
+          />
+        </div>
+
+        {/* Remote Users */}
+        {participants.map(p => (
+          <div key={p.userId} className={cn(
+            "relative transition-all duration-500 ease-in-out overflow-hidden rounded-xl shadow-lg border border-white/10 bg-black/40",
+            layoutMode === 'speaker' ? (
+              mainSpeaker?.userId === p.userId
+                ? "w-full h-full max-w-5xl aspect-video z-10" // Remote user is main speaker
+                : "hidden" // Hide others in speaker mode (they remain mounted!)
+            ) : "w-full h-full" // Grid mode
+          )}>
+            <ParticipantCard
+              participant={p}
+              isLocal={false}
+              onRemoteVideoRef={handleRemoteVideoRef}
+              isPinned={pinnedUserId === p.userId}
+              onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
+            />
+          </div>
+        ))}
+      </div>
 
       {/* Top Bar (View Switcher) */}
       <div
@@ -1164,194 +1215,23 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
           </Button>
         </div>
-      </div >
+      </div>
 
-      <div className="flex flex-1 overflow-hidden relative">
-        <ReactionOverlay reactions={reactions} />
-        {/* Main Content Area */}
-        <main className={cn(
-          "flex-1 bg-neutral-900 relative p-4 flex items-center justify-center transition-all duration-300",
-          showChatPanel ? "mr-0" : "mr-0"
-        )}>
-          {layoutMode === 'speaker' ? (
-            // Speaker View
-            <div className="w-full h-full flex flex-col md:flex-row gap-4">
-              {/* Main Stage */}
-              <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl">
-                {mainSpeaker ? (
-                  <ParticipantCard
-                    key={mainSpeaker.userId}
-                    participant={mainSpeaker}
-                    isPinned={mainSpeaker.userId === pinnedUserId}
-                    className="w-full h-full rounded-none border-0"
-                    onRemoteVideoRef={handleRemoteVideoRef}
-                  />
-                ) : (
-                  <ParticipantCard
-                    key="local-main"
-                    participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
-                    isLocal={true}
-                    localVideoOn={localVideoOn}
-                    localStream={localStream}
-                    setLocalVideoRef={(el) => { localVideoRef.current = el; }}
-                    className="w-full h-full rounded-none border-0"
-                  />
-                )}
-              </div>
-              {/* Filmstrip */}
-              {(participants.length > 0) && (
-                <div className="h-32 md:h-full md:w-48 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide">
-                  {mainSpeaker && (
-                    <ParticipantCard
-                      participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
-                      isLocal={true}
-                      localVideoOn={localVideoOn}
-                      localStream={localStream}
-                      setLocalVideoRef={(el) => { localVideoRef.current = el; }}
-                      className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
-                    />
-                  )}
-                  {others.map(p => (
-                    <ParticipantCard
-                      key={p.userId}
-                      participant={p}
-                      isPinned={p.userId === pinnedUserId}
-                      className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
-                      onRemoteVideoRef={handleRemoteVideoRef}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : (
-            // Grid View
-            <div className={cn(
-              "w-full h-full grid gap-4 p-4 overflow-y-auto auto-rows-fr",
-              (participants.length + 1) <= 1 ? "grid-cols-1" :
-                (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2" :
-                  (participants.length + 1) <= 4 ? "grid-cols-2" :
-                    (participants.length + 1) <= 9 ? "grid-cols-2 md:grid-cols-3" :
-                      "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
-            )}>
-              <ParticipantCard
-                participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
-                isLocal={true}
-                localVideoOn={localVideoOn}
-                localStream={localStream}
-                isMuted={isMuted}
-                setLocalVideoRef={(el) => { localVideoRef.current = el; }}
-              />
-              {participants.map(p => (
-                <ParticipantCard
-                  key={p.userId}
-                  participant={p}
-                  isPinned={p.userId === pinnedUserId}
-                  onPin={(userId) => setPinnedUserId(pinnedUserId === userId ? null : userId)}
-                  onRemoteVideoRef={handleRemoteVideoRef}
-                />
-              ))}
-            </div>
-          )}
-        </main>
 
-        {/* Chat Panel Overlay (Mobile only) */}
-        {showChatPanel && (
-          <div
-            className="fixed inset-0 bg-black/50 z-40 md:hidden"
-            onClick={() => setShowChatPanel(false)}
-          />
-        )}
-
-        {/* Chat Panel (Responsive) */}
-        <div className={cn(
-          "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
-          showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
-        )}>
-          <ChatPanel
-            messages={chatMessages}
-            currentUserId={(session?.user as any)?.id || session?.user?.email}
-            newMessage={newMessage}
-            onNewMessageChange={setNewMessage}
-            onSendMessage={sendMessage}
-            onClose={() => setShowChatPanel(false)}
-          />
-        </div>
-      </div >
-
-      {/* Control Bar Toggle Button (Desktop Only) */}
-      < div
-        onMouseEnter={handleControlsMouseEnter}
-        onMouseLeave={handleControlsMouseLeave}
-        className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 hidden md:flex flex-col items-center gap-4"
-        style={{ bottom: showControls ? '80px' : '20px' }}>
-
-        {showControls && (
-          <ReactionBar onReaction={handleSendReaction} />
-        )}
-
-        <Button
-          variant="secondary"
-          size="sm"
-          className="rounded-full shadow-lg bg-background/80 backdrop-blur-sm border hover:bg-background"
-          onClick={() => setShowControls(!showControls)}
-        >
-          {showControls ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
-        </Button>
-      </div >
-
-      {/* Control Bar */}
-      < div className={
-        cn(
-          "fixed bottom-0 left-0 right-0 h-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t z-40 transition-transform duration-300 ease-in-out flex items-center justify-center space-x-4",
-          showControls ? "translate-y-0" : "translate-y-full"
-        )
-      } >
-        <Button
-          variant={isMuted ? "destructive" : "secondary"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={toggleMute}
-        >
-          {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-        </Button>
-
-        <Button
-          variant={localVideoOn ? "secondary" : "destructive"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={toggleCamera}
-        >
-          {localVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-        </Button>
-
-        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowMorePanel(true)}>
-          <Settings className="w-5 h-5" />
-        </Button>
-
-        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowParticipantsPanel(true)}>
-          <Users className="w-5 h-5" />
-        </Button>
-
-        <Button
-          variant={showChatPanel ? "default" : "secondary"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={() => setShowChatPanel(!showChatPanel)}
-        >
-          <MessageSquare className="w-5 h-5" />
-        </Button>
-
-        <div className="w-px h-8 bg-border mx-2" />
-
-        <Button
-          variant="destructive"
-          className="rounded-full px-6 h-12 font-semibold bg-red-600 hover:bg-red-700"
-          onClick={handleEndCallClick}
-        >
-          End Call
-        </Button>
-      </div >
-
+      {/* Chat Panel (Responsive) */}
+      <div className={cn(
+        "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
+        showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
+      )}>
+        <ChatPanel
+          messages={chatMessages}
+          currentUserId={(session?.user as any)?.id || session?.user?.email}
+          newMessage={newMessage}
+          onNewMessageChange={setNewMessage}
+          onSendMessage={sendMessage}
+          onClose={() => setShowChatPanel(false)}
+        />
+      </div>
 
       {/* Participants Panel (Modal) */}
       {
