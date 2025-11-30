@@ -47,6 +47,15 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
         }
     });
 
+    // Handle remote video ref safely
+    useEffect(() => {
+        if (!isLocal && videoRef.current && onRemoteVideoRef) {
+            // Ensure no local stream is attached
+            videoRef.current.srcObject = null;
+            onRemoteVideoRef(participant.userId, videoRef.current);
+        }
+    }, [isLocal, participant.userId, onRemoteVideoRef]);
+
     return (
         <div className={cn("relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all", className)}>
             {/* Video / Avatar Area */}
@@ -71,11 +80,11 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                 ) : (
                     <video
                         key="remote-video"
-                        ref={el => {
+                        ref={(el) => {
                             if (el) {
-                                // CRITICAL FIX: Ensure no local stream is attached
-                                el.srcObject = null;
-                                onRemoteVideoRef?.(participant.userId, el);
+                                (videoRef as any).current = el;
+                                // Only call callback if it hasn't been handled by useEffect yet
+                                // Actually, useEffect is better.
                             }
                         }}
                         autoPlay
