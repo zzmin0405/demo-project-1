@@ -286,23 +286,28 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
+      socket.on('media-chunk', async (data: { socketId: string, userId?: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
         const { socketId, chunk, mimeType = 'video/webm; codecs="vp8, opus"' } = data;
         // console.log(`Received media chunk from ${socketId}, size: ${chunk.byteLength || chunk.length}`); // Uncomment for verbose debugging
         const blob = new Blob([chunk], { type: mimeType });
 
-        if (!mediaSourcesRef.current[socketId]) {
-          let userId = socketIdToUserIdMap.current[socketId];
+        // Use userId from payload if available (Authoritative), otherwise fallback to map
+        let userId = data.userId || socketIdToUserIdMap.current[socketId];
 
+        if (!mediaSourcesRef.current[socketId]) {
           // Fallback: Try to find user in participants state if map is missing entry
           if (!userId) {
             const p = participants.find((p: any) => p.socketId === socketId);
             if (p) {
               console.log(`[MediaChunk] Recovered userId ${p.userId} from participants state for socket ${socketId}`);
               userId = p.userId;
-              socketIdToUserIdMap.current[socketId] = userId;
-              userIdToSocketIdMap.current[userId] = socketId;
             }
+          }
+
+          // Update map if we have a userId
+          if (userId) {
+            socketIdToUserIdMap.current[socketId] = userId;
+            userIdToSocketIdMap.current[userId] = socketId;
           }
 
           if (userId === currentUserId) {
@@ -316,6 +321,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             console.warn(`[MediaChunk] Unknown socketId: ${socketId}. Map size: ${Object.keys(socketIdToUserIdMap.current).length}`);
           }
         }
+
+        // Re-check loopback for existing sources (Safety)
+        if (userId === currentUserId) return;
 
         const sourceBuffer = sourceBuffersRef.current[socketId];
         const mediaSource = mediaSourcesRef.current[socketId];

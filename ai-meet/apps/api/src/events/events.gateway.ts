@@ -341,8 +341,10 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const chunk = payload.chunk || payload;
       const mimeType = payload.mimeType || 'video/webm; codecs="vp8, opus"';
 
+      const userId = client['user']?.sub;
       client.to(roomId).emit('media-chunk', {
         socketId: client.id,
+        userId: userId, // Explicitly send userId to prevent mapping errors
         chunk: chunk,
         mimeType: mimeType
       });
