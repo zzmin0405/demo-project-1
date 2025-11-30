@@ -21,10 +21,10 @@ interface Participant {
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
   cors: {
-    origin: true,
+    origin: '*',
     methods: ["GET", "POST"],
     allowedHeaders: ['authorization', 'content-type'],
-    credentials: true,
+    credentials: false,
   },
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
