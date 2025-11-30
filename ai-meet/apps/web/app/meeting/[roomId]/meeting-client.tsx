@@ -995,6 +995,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     participant={mainSpeaker}
                     isPinned={mainSpeaker.userId === pinnedUserId}
                     className="w-full h-full rounded-none border-0"
+                    onRemoteVideoRef={(userId: string, el: HTMLVideoElement | null) => {
+                      if (userId) {
+                        remoteVideoRefs.current[userId] = el;
+                        const socketId = userIdToSocketIdMap.current[userId];
+                        if (socketId && mediaSourcesRef.current[socketId] && el && !el.src) {
+                          console.log(`[Late Attach] Attaching existing MediaSource to new video element for ${userId}`);
+                          el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
+                          el.onloadedmetadata = () => el.play().catch((e: any) => console.error("Autoplay failed", e));
+                        }
+                      }
+                    }}
                   />
                 ) : (
                   <ParticipantCard
@@ -1026,6 +1037,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                       participant={p}
                       isPinned={p.userId === pinnedUserId}
                       className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
+                      onRemoteVideoRef={(userId: string, el: HTMLVideoElement | null) => {
+                        if (userId) {
+                          remoteVideoRefs.current[userId] = el;
+                          const socketId = userIdToSocketIdMap.current[userId];
+                          if (socketId && mediaSourcesRef.current[socketId] && el && !el.src) {
+                            console.log(`[Late Attach] Attaching existing MediaSource to new video element for ${userId}`);
+                            el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
+                            el.onloadedmetadata = () => el.play().catch((e: any) => console.error("Autoplay failed", e));
+                          }
+                        }
+                      }}
                     />
                   ))}
                 </div>
