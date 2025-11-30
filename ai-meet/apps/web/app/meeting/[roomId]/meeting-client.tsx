@@ -955,15 +955,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       const socketId = userIdToSocketIdMap.current[userId];
       if (socketId && mediaSourcesRef.current[socketId]) {
         const mediaSource = mediaSourcesRef.current[socketId];
-        if (mediaSource.readyState === 'closed') {
-          console.warn(`[VideoRef] MediaSource for ${userId} is closed, skipping`);
-          return;
-        }
 
-        // Always refresh the Blob URL to prevent stale/revoked URLs
+        // Always clean up old Blob URL first
         const oldSrc = el.src;
         if (oldSrc && oldSrc.startsWith('blob:')) {
           URL.revokeObjectURL(oldSrc);
+          el.src = '';
+        }
+
+        if (mediaSource.readyState === 'closed') {
+          console.warn(`[VideoRef] MediaSource for ${userId} is closed, cleared stale src`);
+          return;
         }
 
         console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
