@@ -765,6 +765,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     setLocalVideoOn(videoTrack.enabled);
     console.log(`[toggleCamera] New enabled: ${videoTrack.enabled}, will set localVideoOn to: ${videoTrack.enabled}`);
 
+    // Restart MediaRecorder if turning video ON to send a fresh Init Segment
+    if (videoTrack.enabled && localStreamRef.current) {
+      console.log('[toggleCamera] Restarting MediaRecorder to send fresh Init Segment...');
+      setupMediaRecorder(localStreamRef.current);
+    }
+
     socketRef.current?.emit('camera-state-changed', {
       roomId,
       userId: currentUserId,
