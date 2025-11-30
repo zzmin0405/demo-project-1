@@ -58,7 +58,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
 
   const [pinnedUserId, setPinnedUserId] = useState<string | null>(null);
-  const [showControls, setShowControls] = useState(true);
+  const [showControls, setShowControls] = useState(false);
   const [showParticipantsPanel, setShowParticipantsPanel] = useState(false);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -1013,7 +1013,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   }, [participants]); // Re-create if participants change, but that's okay.
 
   return (
-    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative" >
+    <div
+      className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
+      onClick={(e) => {
+        // Only toggle if clicking the main container, not buttons or controls
+        if (e.target === e.currentTarget || (e.target as HTMLElement).closest('.participant-card')) {
+          setShowControls(prev => !prev);
+        }
+      }}
+    >
 
       {/* Top Bar (View Switcher) */}
       < div className={
