@@ -176,7 +176,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       console.log('Client: Connecting to WebSocket at', websocketUrl);
 
       socketRef.current = io(websocketUrl, {
-        transports: ['polling'], // Force polling to bypass ngrok/tunnel issues if needed
+        transports: ['websocket', 'polling'], // Try websocket first, then polling
         auth: {
           token: 'test-token', // Replace with actual auth token if needed
           userId: currentUserId
@@ -189,6 +189,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       const socket = socketRef.current;
+
+      socket.on('connect_error', (err) => {
+        console.error(`[SocketDebug] Connection Error: ${err.message}`, err);
+      });
+
+      socket.on('connect_timeout', (timeout) => {
+        console.error(`[SocketDebug] Connection Timeout: ${timeout}`);
+      });
+
+      socket.on('error', (err) => {
+        console.error(`[SocketDebug] Generic Error:`, err);
+      });
 
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
