@@ -608,14 +608,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         sourceBuffer.addEventListener('updateend', async () => {
           // Prune old buffer data to prevent memory overflow
           if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
+            const userId = socketIdToUserIdMap.current[socketId];
+            const videoElement = userId ? remoteVideoRefs.current[userId] : null;
             const currentTime = videoElement?.currentTime || 0;
             const bufferStart = sourceBuffer.buffered.start(0);
             const bufferEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
 
-            // Keep only last 30 seconds of buffer
-            if (currentTime - bufferStart > 30) {
+            // Keep only last 20 seconds of buffer (reduced from 30 to prevent QuotaExceeded)
+            if (currentTime - bufferStart > 20) {
               try {
-                const removeEnd = Math.max(bufferStart, currentTime - 30);
+                const removeEnd = Math.max(bufferStart, currentTime - 20);
                 sourceBuffer.remove(bufferStart, removeEnd);
                 console.log(`[Buffer] Pruned old data for ${socketId}: ${bufferStart.toFixed(2)}s to ${removeEnd.toFixed(2)}s`);
                 return; // Wait for next updateend to process queue
