@@ -364,7 +364,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
         console.log(`[Client] Camera state changed for userId=${data.userId}, hasVideo=${data.hasVideo}, currentUserId=${currentUserId}`);
-        console.log(`[Client] Current participants:`, participants.map(p => ({ userId: p.userId, username: p.username, hasVideo: p.hasVideo })));
+
+        // REMOVED: Do NOT reset MediaSource. Stream is continuous.
+        // Just update the UI state.
+
         setParticipants(prev => {
           const updated = prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p);
           console.log(`[Client] Updated participants:`, updated.map(p => ({ userId: p.userId, username: p.username, hasVideo: p.hasVideo })));
@@ -853,11 +856,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     setLocalVideoOn(videoTrack.enabled);
     console.log(`[toggleCamera] New enabled: ${videoTrack.enabled}, will set localVideoOn to: ${videoTrack.enabled}`);
 
-    // Restart MediaRecorder if turning video ON to send a fresh Init Segment
-    if (videoTrack.enabled && localStreamRef.current) {
-      console.log('[toggleCamera] Restarting MediaRecorder to send fresh Init Segment...');
-      setupMediaRecorder(localStreamRef.current);
-    }
+    // REMOVED: Do NOT restart MediaRecorder. Keep the stream alive.
+    // videoTrack.enabled = false will send black frames (or no frames) but keep the connection.
 
     socketRef.current?.emit('camera-state-changed', {
       roomId,
