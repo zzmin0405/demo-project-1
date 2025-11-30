@@ -959,10 +959,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           console.warn(`[VideoRef] MediaSource for ${userId} is closed, skipping`);
           return;
         }
-        if (!el.src) {
-          console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
-          el.src = URL.createObjectURL(mediaSource);
+
+        // Always refresh the Blob URL to prevent stale/revoked URLs
+        const oldSrc = el.src;
+        if (oldSrc && oldSrc.startsWith('blob:')) {
+          URL.revokeObjectURL(oldSrc);
         }
+
+        console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
+        el.src = URL.createObjectURL(mediaSource);
+
         el.play().catch(e => {
           if (e.name !== 'AbortError') {
             console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
