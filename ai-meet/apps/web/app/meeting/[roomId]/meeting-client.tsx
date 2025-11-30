@@ -396,6 +396,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         alert(data.message);
         router.push('/');
       });
+
+      console.log('Client: Calling socket.connect()...');
+      socket.connect();
     };
 
     initialize();
