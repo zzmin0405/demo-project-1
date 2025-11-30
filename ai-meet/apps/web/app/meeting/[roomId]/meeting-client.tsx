@@ -629,6 +629,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             }
           }
 
+          // Gap Detection and Jump Logic
+          if (sourceBuffer.buffered.length > 1 && videoElement) {
+            const currentTime = videoElement.currentTime;
+            for (let i = 0; i < sourceBuffer.buffered.length - 1; i++) {
+              const end = sourceBuffer.buffered.end(i);
+              const nextStart = sourceBuffer.buffered.start(i + 1);
+              // If we are near the end of a range (within 0.5s) or in the gap
+              if (currentTime >= end - 0.5 && currentTime < nextStart) {
+                console.log(`[Gap] Jumping from ${currentTime.toFixed(2)} to ${nextStart.toFixed(2)} for ${socketId}`);
+                videoElement.currentTime = nextStart;
+                break;
+              }
+            }
+          }
+
+
           // Process queued chunks
           if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
             const nextChunk = chunkQueueRef.current[socketId][0]; // Peek first
