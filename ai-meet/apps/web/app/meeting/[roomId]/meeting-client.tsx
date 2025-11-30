@@ -601,6 +601,26 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         sourceBuffersRef.current[socketId] = sourceBuffer;
 
         sourceBuffer.addEventListener('updateend', async () => {
+          // Prune old buffer data to prevent memory overflow
+          if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
+            const currentTime = videoElement?.currentTime || 0;
+            const bufferStart = sourceBuffer.buffered.start(0);
+            const bufferEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+
+            // Keep only last 30 seconds of buffer
+            if (currentTime - bufferStart > 30) {
+              try {
+                const removeEnd = Math.max(bufferStart, currentTime - 30);
+                sourceBuffer.remove(bufferStart, removeEnd);
+                console.log(`[Buffer] Pruned old data for ${socketId}: ${bufferStart.toFixed(2)}s to ${removeEnd.toFixed(2)}s`);
+                return; // Wait for next updateend to process queue
+              } catch (e) {
+                console.warn(`[Buffer] Failed to prune for ${socketId}`, e);
+              }
+            }
+          }
+
+          // Process queued chunks
           if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
             const nextChunk = chunkQueueRef.current[socketId].shift();
             if (nextChunk) {
