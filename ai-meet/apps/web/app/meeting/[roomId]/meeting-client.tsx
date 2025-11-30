@@ -1202,23 +1202,32 @@ return (
         )}
       </main>
 
-      {/* Chat Panel (Right Sidebar) */}
-      {
-        showChatPanel && (
-          <ChatPanel
-            messages={chatMessages}
-            currentUserId={(session?.user as any)?.id || session?.user?.email}
-            newMessage={newMessage}
-            onNewMessageChange={setNewMessage}
-            onSendMessage={sendMessage}
-            onClose={() => setShowChatPanel(false)}
-          />
-        )
-      }
+      {/* Chat Panel Overlay (Mobile only) */}
+      {showChatPanel && (
+        <div
+          className="fixed inset-0 bg-black/50 z-40 md:hidden"
+          onClick={() => setShowChatPanel(false)}
+        />
+      )}
+
+      {/* Chat Panel (Responsive) */}
+      <div className={cn(
+        "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
+        showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
+      )}>
+        <ChatPanel
+          messages={chatMessages}
+          currentUserId={(session?.user as any)?.id || session?.user?.email}
+          newMessage={newMessage}
+          onNewMessageChange={setNewMessage}
+          onSendMessage={sendMessage}
+          onClose={() => setShowChatPanel(false)}
+        />
+      </div>
     </div >
 
-    {/* Control Bar Toggle Button */}
-    < div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 flex flex-col items-center gap-4"
+    {/* Control Bar Toggle Button (Desktop Only) */}
+    < div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 hidden md:flex flex-col items-center gap-4"
       style={{ bottom: showControls ? '80px' : '20px' }}>
 
       {showControls && (
