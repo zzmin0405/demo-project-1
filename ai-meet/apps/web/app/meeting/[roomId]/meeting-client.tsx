@@ -978,8 +978,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
   const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
 
-
-
   const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
     console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
     if (userId && el) {
@@ -987,6 +985,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       const socketId = userIdToSocketIdMap.current[userId];
       if (socketId && mediaSourcesRef.current[socketId]) {
         const mediaSource = mediaSourcesRef.current[socketId];
+
+        // If element already has a blob source and is not closed, skip re-attaching
+        if (el.src && el.src.startsWith('blob:') && mediaSource.readyState === 'open') {
+          console.log(`[VideoRef] Skipping re-attach for ${userId}, already has blob src`);
+          return;
+        }
 
         // Always clean up old Blob URL first
         const oldSrc = el.src;
@@ -1010,7 +1014,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       }
     }
-  }, []); // REMOVED participants dependency to prevent re-creation on every state change
+  }, []);
 
   return (
     <div
