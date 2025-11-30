@@ -179,7 +179,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       socketRef.current = io(websocketUrl, {
         transports: ['websocket', 'polling'], // Try websocket first, then polling
         auth: {
-          token: 'test-token', // Replace with actual auth token if needed
+          token: currentUserId, // Use actual userId as token for SupabaseAuthGuard
           userId: currentUserId
         },
         reconnection: true,
