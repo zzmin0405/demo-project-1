@@ -1005,25 +1005,23 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const autoHideTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isHoveringControlsRef = useRef(false);
 
-  const startAutoHideTimer = useCallback(() => {
-    if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
-    if (isHoveringControlsRef.current) return; // Don't hide if hovering
-
+  const resetControlsTimer = useCallback(() => {
+    if (autoHideTimerRef.current) {
+      clearTimeout(autoHideTimerRef.current);
+    }
     autoHideTimerRef.current = setTimeout(() => {
       setShowControls(false);
     }, 3000);
   }, []);
 
   useEffect(() => {
-    if (showControls) {
-      startAutoHideTimer();
-    } else {
-      if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
-    }
+    resetControlsTimer();
     return () => {
       if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
     };
-  }, [showControls, startAutoHideTimer]);
+  }, [resetControlsTimer]);
+
+
 
   const handleControlsMouseEnter = () => {
     isHoveringControlsRef.current = true;
@@ -1032,7 +1030,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const handleControlsMouseLeave = () => {
     isHoveringControlsRef.current = false;
-    if (showControls) startAutoHideTimer();
+    if (showControls) resetControlsTimer();
   };
 
   const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
@@ -1098,10 +1096,21 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   return (
     <div
       className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
+      onMouseMove={() => {
+        if (showControls) {
+          resetControlsTimer();
+        }
+      }}
       onClick={(e) => {
         // Only toggle if clicking the main container, not buttons or controls
         if (e.target === e.currentTarget || (e.target as HTMLElement).closest('.participant-card')) {
-          setShowControls(prev => !prev);
+          if (showControls) {
+            setShowControls(false);
+            if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+          } else {
+            setShowControls(true);
+            resetControlsTimer();
+          }
         }
       }}
     >
@@ -1215,6 +1224,60 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
           </Button>
         </div>
+      </div>
+
+      {/* Control Bar - Responsive (Fixed Bottom on Mobile, Floating Pill on Desktop) */}
+      <div
+        onMouseEnter={handleControlsMouseEnter}
+        onMouseLeave={handleControlsMouseLeave}
+        className={cn(
+          "fixed z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-2 md:space-x-4 shadow-2xl",
+          // Mobile Styles: Bottom fixed, full width, black background
+          "bottom-0 left-0 right-0 h-16 bg-black border-t border-white/10 rounded-none px-4",
+          // Desktop Styles: Floating pill, centered, rounded
+          "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:h-auto md:bg-black/80 md:backdrop-blur-xl md:border md:rounded-full md:px-6 md:py-3 md:w-auto",
+          showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Button
+          variant={isMuted ? "destructive" : "secondary"}
+          size="icon"
+          className="rounded-full w-10 h-10 md:w-12 md:h-12"
+          onClick={toggleMute}
+        >
+          {isMuted ? <MicOff className="w-4 h-4 md:w-5 md:h-5" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
+        </Button>
+        <Button
+          variant={localVideoOn ? "secondary" : "destructive"}
+          size="icon"
+          className="rounded-full w-10 h-10 md:w-12 md:h-12"
+          onClick={toggleCamera}
+        >
+          {localVideoOn ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
+        </Button>
+        <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowMorePanel(true)}>
+          <Settings className="w-4 h-4 md:w-5 md:h-5" />
+        </Button>
+        <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowParticipantsPanel(true)}>
+          <Users className="w-4 h-4 md:w-5 md:h-5" />
+        </Button>
+        <Button
+          variant={showChatPanel ? "default" : "secondary"}
+          size="icon"
+          className="rounded-full w-10 h-10 md:w-12 md:h-12"
+          onClick={() => setShowChatPanel(!showChatPanel)}
+        >
+          <MessageSquare className="w-4 h-4 md:w-5 md:h-5" />
+        </Button>
+        <div className="w-px h-6 md:h-8 bg-white/20 mx-1 md:mx-2" />
+        <Button
+          variant="destructive"
+          className="rounded-full px-4 md:px-6 h-10 md:h-12 font-semibold bg-red-600 hover:bg-red-700 text-sm md:text-base"
+          onClick={handleEndCallClick}
+        >
+          End
+        </Button>
       </div>
 
 
