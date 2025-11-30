@@ -38,8 +38,14 @@ export async function DELETE(
 
         // Call NestJS API to force delete and kick users
         // Use localhost for server-to-server communication to avoid DNS issues with Cloudflare Tunnel
-        const backendUrl = 'http://127.0.0.1:3001';
-        // const backendUrl = 'https://athletics-blackberry-hygiene-excluded.trycloudflare.com'; 
+        let backendUrl = 'http://127.0.0.1:3001';
+
+        // In production (Vercel), we might need to use the Cloudflare URL if the backend is not on the same host (which it isn't)
+        // But since Vercel cannot reach localhost:3001 of the user's machine, we MUST use the Cloudflare URL.
+        if (process.env.NODE_ENV === 'production') {
+            backendUrl = process.env.BACKEND_URL || 'https://YOUR-CLOUDFLARE-URL.trycloudflare.com';
+        }
+
         const response = await fetch(`${backendUrl}/meetings/${roomId}`, {
             method: 'DELETE',
             headers: {
