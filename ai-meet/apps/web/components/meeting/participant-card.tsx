@@ -57,12 +57,14 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                             // Combine refs
                             if (setLocalVideoRef) setLocalVideoRef(el);
                             (videoRef as any).current = el;
+                            if (el && localStream) {
+                                el.srcObject = localStream;
+                            }
                         }}
                         autoPlay
                         muted
                         playsInline
-                        className={cn("w-full h-full object-contain", (localVideoOn && localStream) ? 'block' : 'hidden')}
-                        style={{ display: (localVideoOn && localStream) ? 'block' : 'none' }}
+                        className={cn("w-full h-full object-contain", localVideoOn ? 'block' : 'hidden')}
                     />
                 ) : (
                     <video
