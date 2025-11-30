@@ -365,8 +365,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
         console.log(`[Client] Camera state changed for userId=${data.userId}, hasVideo=${data.hasVideo}, currentUserId=${currentUserId}`);
 
-        // REMOVED: Do NOT reset MediaSource. Stream is continuous.
-        // Just update the UI state.
+        // If video is turned ON (or OFF), we should reset the MediaSource to ensure fresh state.
+        // Especially when turning ON, the sender restarts MediaRecorder, so we need a new MediaSource.
+        if (data.userId !== currentUserId) {
+          const socketId = userIdToSocketIdMap.current[data.userId];
+          if (socketId) {
+            console.log(`[Client] Resetting MediaSource for ${data.userId} due to camera toggle`);
+            cleanupMediaSource(socketId);
+          }
+        }
 
         setParticipants(prev => {
           const updated = prev.map(p => p.userId === data.userId ? { ...p, hasVideo: data.hasVideo } : p);
@@ -851,603 +858,591 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       return;
     }
 
-    console.log(`[toggleCamera] Current enabled: ${videoTrack.enabled}, localVideoOn: ${localVideoOn}`);
-    videoTrack.enabled = !videoTrack.enabled;
-    setLocalVideoOn(videoTrack.enabled);
-    console.log(`[toggleCamera] New enabled: ${videoTrack.enabled}, will set localVideoOn to: ${videoTrack.enabled}`);
+  });
+  console.log(`[toggleCamera] Emitted camera-state-changed: roomId=${roomId}, userId=${currentUserId}, hasVideo=${videoTrack.enabled}`);
+  console.log(`[toggleCamera] Emitted camera-state-changed for ${currentUserId}: ${videoTrack.enabled}`);
+};
 
-    // REMOVED: Do NOT restart MediaRecorder. Keep the stream alive.
-    // videoTrack.enabled = false will send black frames (or no frames) but keep the connection.
+const toggleMute = () => {
+  if (!gainNodeRef.current) {
+    console.warn('GainNode not available. Media stream not initialized.');
+    return;
+  }
 
-    socketRef.current?.emit('camera-state-changed', {
-      roomId,
-      userId: currentUserId,
-      hasVideo: videoTrack.enabled,
-    });
-    console.log(`[toggleCamera] Emitted camera-state-changed: roomId=${roomId}, userId=${currentUserId}, hasVideo=${videoTrack.enabled}`);
-    console.log(`[toggleCamera] Emitted camera-state-changed for ${currentUserId}: ${videoTrack.enabled}`);
-  };
+  const newMutedState = !isMuted;
+  setIsMuted(newMutedState);
+  gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
 
-  const toggleMute = () => {
-    if (!gainNodeRef.current) {
-      console.warn('GainNode not available. Media stream not initialized.');
-      return;
-    }
+  socketRef.current?.emit('mic-state-changed', {
+    roomId,
+    userId: currentUserId,
+    isMuted: newMutedState
+  });
+};
 
-    const newMutedState = !isMuted;
-    setIsMuted(newMutedState);
-    gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
-
-    socketRef.current?.emit('mic-state-changed', {
-      roomId,
-      userId: currentUserId,
-      isMuted: newMutedState
-    });
-  };
-
-  const copyLink = () => {
-    navigator.clipboard.writeText(window.location.href);
-    setIsLinkCopied(true);
-    setTimeout(() => {
-      setIsLinkCopied(false);
-    }, 2000);
-  };
+const copyLink = () => {
+  navigator.clipboard.writeText(window.location.href);
+  setIsLinkCopied(true);
+  setTimeout(() => {
+    setIsLinkCopied(false);
+  }, 2000);
+};
 
 
 
-  const leaveRoom = () => {
-    console.log('Client: Leaving room');
-    mediaRecorderRef.current?.stop();
-    localStreamRef.current?.getTracks().forEach(track => track.stop());
+const leaveRoom = () => {
+  console.log('Client: Leaving room');
+  mediaRecorderRef.current?.stop();
+  localStreamRef.current?.getTracks().forEach(track => track.stop());
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-    }
+  if (audioContextRef.current) {
+    audioContextRef.current.close();
+  }
 
-    // Explicitly notify server before disconnecting and wait for Ack
-    if (socketRef.current?.connected) {
-      const timeout = setTimeout(() => {
-        console.log('Client: Leave Ack timed out, forcing disconnect');
-        socketRef.current?.disconnect();
-        router.push('/');
-      }, 500); // Wait max 500ms
-
-      socketRef.current.emit('leave-room', {}, () => {
-        console.log('Client: Leave Ack received');
-        clearTimeout(timeout);
-        socketRef.current?.disconnect();
-        router.push('/');
-      });
-    } else {
-      // If already disconnected, just go home
+  // Explicitly notify server before disconnecting and wait for Ack
+  if (socketRef.current?.connected) {
+    const timeout = setTimeout(() => {
+      console.log('Client: Leave Ack timed out, forcing disconnect');
+      socketRef.current?.disconnect();
       router.push('/');
-    }
-  };
+    }, 500); // Wait max 500ms
 
-  const handleEndCallClick = () => {
-    if (exitImmediately) {
-      leaveRoom();
-    } else {
-      setShowEndCallModal(true);
-    }
-  };
-
-  const handleExitImmediatelyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newValue = e.target.checked;
-    setExitImmediately(newValue);
-    localStorage.setItem('exitImmediately', String(newValue));
-  };
-
-  // --- Chat Logic ---
-  useEffect(() => {
-    if (chatScrollRef.current) {
-      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-    }
-  }, [chatMessages, showChatPanel]);
-
-
-
-  const sendMessage = (e?: React.FormEvent) => {
-    e?.preventDefault();
-    console.log('[ChatDebug] sendMessage called. Message:', newMessage);
-
-    if (!newMessage.trim()) {
-      console.log('[ChatDebug] Message is empty');
-      return;
-    }
-
-    if (!socketRef.current) {
-      console.error('[ChatDebug] Socket not connected');
-      return;
-    }
-
-    if (!socketRef.current.connected) {
-      console.error('[ChatDebug] Socket instance exists but is disconnected');
-      alert('서버와 연결이 끊겨있습니다. 잠시 후 다시 시도해주세요.');
-      return;
-    }
-
-    console.log('[ChatDebug] Emitting chat-message to room:', roomId);
-    socketRef.current.emit('chat-message', {
-      roomId,
-      message: newMessage
+    socketRef.current.emit('leave-room', {}, () => {
+      console.log('Client: Leave Ack received');
+      clearTimeout(timeout);
+      socketRef.current?.disconnect();
+      router.push('/');
     });
-    setNewMessage('');
-  };
+  } else {
+    // If already disconnected, just go home
+    router.push('/');
+  }
+};
 
-  const handleTitleUpdate = () => {
-    if (!tempTitle.trim() || tempTitle === meetingTitle) {
-      setIsEditingTitle(false);
-      return;
-    }
-    socketRef.current?.emit('update-meeting-title', { roomId, title: tempTitle });
+const handleEndCallClick = () => {
+  if (exitImmediately) {
+    leaveRoom();
+  } else {
+    setShowEndCallModal(true);
+  }
+};
+
+const handleExitImmediatelyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const newValue = e.target.checked;
+  setExitImmediately(newValue);
+  localStorage.setItem('exitImmediately', String(newValue));
+};
+
+// --- Chat Logic ---
+useEffect(() => {
+  if (chatScrollRef.current) {
+    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+  }
+}, [chatMessages, showChatPanel]);
+
+
+
+const sendMessage = (e?: React.FormEvent) => {
+  e?.preventDefault();
+  console.log('[ChatDebug] sendMessage called. Message:', newMessage);
+
+  if (!newMessage.trim()) {
+    console.log('[ChatDebug] Message is empty');
+    return;
+  }
+
+  if (!socketRef.current) {
+    console.error('[ChatDebug] Socket not connected');
+    return;
+  }
+
+  if (!socketRef.current.connected) {
+    console.error('[ChatDebug] Socket instance exists but is disconnected');
+    alert('서버와 연결이 끊겨있습니다. 잠시 후 다시 시도해주세요.');
+    return;
+  }
+
+  console.log('[ChatDebug] Emitting chat-message to room:', roomId);
+  socketRef.current.emit('chat-message', {
+    roomId,
+    message: newMessage
+  });
+  setNewMessage('');
+};
+
+const handleTitleUpdate = () => {
+  if (!tempTitle.trim() || tempTitle === meetingTitle) {
     setIsEditingTitle(false);
-  };
+    return;
+  }
+  socketRef.current?.emit('update-meeting-title', { roomId, title: tempTitle });
+  setIsEditingTitle(false);
+};
 
-  const handleSendReaction = (emoji: string) => {
-    socketRef.current?.emit('send-reaction', { roomId, emoji });
-    // Optimistically show reaction for self? 
-    // The server broadcasts to everyone including sender, so we can wait for that.
-    // Or we can show it immediately for better responsiveness.
-    // Let's rely on server broadcast for consistency for now.
-  };
+const handleSendReaction = (emoji: string) => {
+  socketRef.current?.emit('send-reaction', { roomId, emoji });
+  // Optimistically show reaction for self? 
+  // The server broadcasts to everyone including sender, so we can wait for that.
+  // Or we can show it immediately for better responsiveness.
+  // Let's rely on server broadcast for consistency for now.
+};
 
-  // --- UI Components ---
+// --- UI Components ---
 
-  // --- Render Logic ---
+// --- Render Logic ---
 
-  const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
-  const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
-  const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
+const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
+const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
+const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
 
-  const mediaSourceUrlsRef = useRef<{ [socketId: string]: string }>({}); // Track created Object URLs
+const mediaSourceUrlsRef = useRef<{ [socketId: string]: string }>({}); // Track created Object URLs
 
-  const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
-    console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
-    if (userId && el) {
-      remoteVideoRefs.current[userId] = el;
-      const socketId = userIdToSocketIdMap.current[userId];
-      if (socketId && mediaSourcesRef.current[socketId]) {
-        const mediaSource = mediaSourcesRef.current[socketId];
-        const currentUrl = mediaSourceUrlsRef.current[socketId];
+const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
+  console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
+  if (userId && el) {
+    remoteVideoRefs.current[userId] = el;
+    const socketId = userIdToSocketIdMap.current[userId];
+    if (socketId && mediaSourcesRef.current[socketId]) {
+      const mediaSource = mediaSourcesRef.current[socketId];
+      const currentUrl = mediaSourceUrlsRef.current[socketId];
 
-        // STRICT CHECK: Only skip if the element is playing the EXACT SAME Blob URL
-        if (el.src && el.src === currentUrl && mediaSource.readyState === 'open') {
-          console.log(`[VideoRef] Skipping re-attach for ${userId}, already playing correct blob: ${currentUrl}`);
-          return;
-        }
-
-        // Always clean up old Blob URL first
-        const oldSrc = el.src;
-        if (oldSrc && oldSrc.startsWith('blob:') && oldSrc !== currentUrl) {
-          URL.revokeObjectURL(oldSrc);
-          el.src = '';
-        }
-
-        if (mediaSource.readyState === 'closed') {
-          console.warn(`[VideoRef] MediaSource for ${userId} is closed, cleared stale src`);
-          return;
-        }
-
-        console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
-
-        // Create new URL if we don't have one or if we are re-attaching
-        let newUrl = currentUrl;
-        if (!newUrl) {
-          newUrl = URL.createObjectURL(mediaSource);
-          mediaSourceUrlsRef.current[socketId] = newUrl;
-        }
-
-        el.src = newUrl;
-
-        el.play().catch(e => {
-          if (e.name !== 'AbortError') {
-            console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
-          }
-        });
+      // STRICT CHECK: Only skip if the element is playing the EXACT SAME Blob URL
+      if (el.src && el.src === currentUrl && mediaSource.readyState === 'open') {
+        console.log(`[VideoRef] Skipping re-attach for ${userId}, already playing correct blob: ${currentUrl}`);
+        return;
       }
-    }
-  }, []);
 
-  return (
-    <div
-      className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
-      onClick={(e) => {
-        // Only toggle if clicking the main container, not buttons or controls
-        if (e.target === e.currentTarget || (e.target as HTMLElement).closest('.participant-card')) {
-          setShowControls(prev => !prev);
+      // Always clean up old Blob URL first
+      const oldSrc = el.src;
+      if (oldSrc && oldSrc.startsWith('blob:') && oldSrc !== currentUrl) {
+        URL.revokeObjectURL(oldSrc);
+        el.src = '';
+      }
+
+      if (mediaSource.readyState === 'closed') {
+        console.warn(`[VideoRef] MediaSource for ${userId} is closed, cleared stale src`);
+        return;
+      }
+
+      console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
+
+      // Create new URL if we don't have one or if we are re-attaching
+      let newUrl = currentUrl;
+      if (!newUrl) {
+        newUrl = URL.createObjectURL(mediaSource);
+        mediaSourceUrlsRef.current[socketId] = newUrl;
+      }
+
+      el.src = newUrl;
+
+      el.play().catch(e => {
+        if (e.name !== 'AbortError') {
+          console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
         }
-      }}
-    >
+      });
+    }
+  }
+}, []);
 
-      {/* Top Bar (View Switcher) */}
-      < div className={
-        cn(
-          "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
-          showControls ? "translate-y-0" : "-translate-y-full"
-        )
-      } >
-        <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
-          {isEditingTitle ? (
-            <Input
-              autoFocus
-              value={tempTitle}
-              onChange={(e) => setTempTitle(e.target.value)}
-              onBlur={handleTitleUpdate}
-              onKeyDown={(e) => e.key === 'Enter' && handleTitleUpdate()}
-              className="h-6 w-48 bg-transparent border-none text-white focus-visible:ring-0 p-0"
-            />
-          ) : (
-            <span
-              onClick={() => {
-                if (isHost) {
-                  setTempTitle(meetingTitle);
-                  setIsEditingTitle(true);
-                }
-              }}
-              className={cn(isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
-              title={isHost ? "Click to edit title" : undefined}
-            >
-              {meetingTitle}
-            </span>
-          )}
-          {isHost && !isEditingTitle && (
-            <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
-              setTempTitle(meetingTitle);
-              setIsEditingTitle(true);
-            }} />
-          )}
-          <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
-        </div>
-        <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
-          <Button
-            variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="text-white hover:bg-white/20"
-            onClick={() => setLayoutMode('speaker')}
-          >
-            <Maximize className="w-4 h-4 mr-2" /> Speaker
-          </Button>
-          <Button
-            variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="text-white hover:bg-white/20"
-            onClick={() => setLayoutMode('grid')}
-          >
-            <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
-          </Button>
-        </div>
-      </div >
+return (
+  <div
+    className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
+    onClick={(e) => {
+      // Only toggle if clicking the main container, not buttons or controls
+      if (e.target === e.currentTarget || (e.target as HTMLElement).closest('.participant-card')) {
+        setShowControls(prev => !prev);
+      }
+    }}
+  >
 
-      <div className="flex flex-1 overflow-hidden relative">
-        <ReactionOverlay reactions={reactions} />
-        {/* Main Content Area */}
-        <main className={cn(
-          "flex-1 bg-neutral-900 relative p-4 flex items-center justify-center transition-all duration-300",
-          showChatPanel ? "mr-0" : "mr-0"
-        )}>
-          {layoutMode === 'speaker' ? (
-            // Speaker View
-            <div className="w-full h-full flex flex-col md:flex-row gap-4">
-              {/* Main Stage */}
-              <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl">
-                {mainSpeaker ? (
+    {/* Top Bar (View Switcher) */}
+    < div className={
+      cn(
+        "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
+        showControls ? "translate-y-0" : "-translate-y-full"
+      )
+    } >
+      <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
+        {isEditingTitle ? (
+          <Input
+            autoFocus
+            value={tempTitle}
+            onChange={(e) => setTempTitle(e.target.value)}
+            onBlur={handleTitleUpdate}
+            onKeyDown={(e) => e.key === 'Enter' && handleTitleUpdate()}
+            className="h-6 w-48 bg-transparent border-none text-white focus-visible:ring-0 p-0"
+          />
+        ) : (
+          <span
+            onClick={() => {
+              if (isHost) {
+                setTempTitle(meetingTitle);
+                setIsEditingTitle(true);
+              }
+            }}
+            className={cn(isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
+            title={isHost ? "Click to edit title" : undefined}
+          >
+            {meetingTitle}
+          </span>
+        )}
+        {isHost && !isEditingTitle && (
+          <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
+            setTempTitle(meetingTitle);
+            setIsEditingTitle(true);
+          }} />
+        )}
+        <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
+      </div>
+      <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
+        <Button
+          variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
+          size="sm"
+          className="text-white hover:bg-white/20"
+          onClick={() => setLayoutMode('speaker')}
+        >
+          <Maximize className="w-4 h-4 mr-2" /> Speaker
+        </Button>
+        <Button
+          variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
+          size="sm"
+          className="text-white hover:bg-white/20"
+          onClick={() => setLayoutMode('grid')}
+        >
+          <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
+        </Button>
+      </div>
+    </div >
+
+    <div className="flex flex-1 overflow-hidden relative">
+      <ReactionOverlay reactions={reactions} />
+      {/* Main Content Area */}
+      <main className={cn(
+        "flex-1 bg-neutral-900 relative p-4 flex items-center justify-center transition-all duration-300",
+        showChatPanel ? "mr-0" : "mr-0"
+      )}>
+        {layoutMode === 'speaker' ? (
+          // Speaker View
+          <div className="w-full h-full flex flex-col md:flex-row gap-4">
+            {/* Main Stage */}
+            <div className="flex-1 relative rounded-xl overflow-hidden bg-black border border-white/10 shadow-2xl">
+              {mainSpeaker ? (
+                <ParticipantCard
+                  key={mainSpeaker.userId}
+                  participant={mainSpeaker}
+                  isPinned={mainSpeaker.userId === pinnedUserId}
+                  className="w-full h-full rounded-none border-0"
+                  onRemoteVideoRef={handleRemoteVideoRef}
+                />
+              ) : (
+                <ParticipantCard
+                  key="local-main"
+                  participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
+                  isLocal={true}
+                  localVideoOn={localVideoOn}
+                  localStream={localStream}
+                  setLocalVideoRef={(el) => { localVideoRef.current = el; }}
+                  className="w-full h-full rounded-none border-0"
+                />
+              )}
+            </div>
+            {/* Filmstrip */}
+            {(participants.length > 0) && (
+              <div className="h-32 md:h-full md:w-48 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide">
+                {mainSpeaker && (
                   <ParticipantCard
-                    key={mainSpeaker.userId}
-                    participant={mainSpeaker}
-                    isPinned={mainSpeaker.userId === pinnedUserId}
-                    className="w-full h-full rounded-none border-0"
-                    onRemoteVideoRef={handleRemoteVideoRef}
-                  />
-                ) : (
-                  <ParticipantCard
-                    key="local-main"
                     participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
                     isLocal={true}
                     localVideoOn={localVideoOn}
                     localStream={localStream}
                     setLocalVideoRef={(el) => { localVideoRef.current = el; }}
-                    className="w-full h-full rounded-none border-0"
+                    className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
                   />
                 )}
-              </div>
-              {/* Filmstrip */}
-              {(participants.length > 0) && (
-                <div className="h-32 md:h-full md:w-48 lg:w-64 flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto scrollbar-hide">
-                  {mainSpeaker && (
-                    <ParticipantCard
-                      participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
-                      isLocal={true}
-                      localVideoOn={localVideoOn}
-                      localStream={localStream}
-                      setLocalVideoRef={(el) => { localVideoRef.current = el; }}
-                      className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
-                    />
-                  )}
-                  {others.map(p => (
-                    <ParticipantCard
-                      key={p.userId}
-                      participant={p}
-                      isPinned={p.userId === pinnedUserId}
-                      className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
-                      onRemoteVideoRef={handleRemoteVideoRef}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : (
-            // Grid View
-            <div className={cn(
-              "w-full h-full grid gap-4 p-4 overflow-y-auto auto-rows-fr",
-              (participants.length + 1) <= 1 ? "grid-cols-1" :
-                (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2" :
-                  (participants.length + 1) <= 4 ? "grid-cols-2" :
-                    (participants.length + 1) <= 9 ? "grid-cols-2 md:grid-cols-3" :
-                      "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
-            )}>
-              <ParticipantCard
-                participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
-                isLocal={true}
-                localVideoOn={localVideoOn}
-                localStream={localStream}
-                isMuted={isMuted}
-                setLocalVideoRef={(el) => { localVideoRef.current = el; }}
-              />
-              {participants.map(p => (
-                <ParticipantCard
-                  key={p.userId}
-                  participant={p}
-                  isPinned={p.userId === pinnedUserId}
-                  onPin={(userId) => setPinnedUserId(pinnedUserId === userId ? null : userId)}
-                  onRemoteVideoRef={handleRemoteVideoRef}
-                />
-              ))}
-            </div>
-          )}
-        </main>
-
-        {/* Chat Panel (Right Sidebar) */}
-        {
-          showChatPanel && (
-            <ChatPanel
-              messages={chatMessages}
-              currentUserId={(session?.user as any)?.id || session?.user?.email}
-              newMessage={newMessage}
-              onNewMessageChange={setNewMessage}
-              onSendMessage={sendMessage}
-              onClose={() => setShowChatPanel(false)}
-            />
-          )
-        }
-      </div >
-
-      {/* Control Bar Toggle Button */}
-      < div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 flex flex-col items-center gap-4"
-        style={{ bottom: showControls ? '80px' : '20px' }}>
-
-        {showControls && (
-          <ReactionBar onReaction={handleSendReaction} />
-        )}
-
-        <Button
-          variant="secondary"
-          size="sm"
-          className="rounded-full shadow-lg bg-background/80 backdrop-blur-sm border hover:bg-background"
-          onClick={() => setShowControls(!showControls)}
-        >
-          {showControls ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
-        </Button>
-      </div >
-
-      {/* Control Bar */}
-      < div className={
-        cn(
-          "fixed bottom-0 left-0 right-0 h-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t z-40 transition-transform duration-300 ease-in-out flex items-center justify-center space-x-4",
-          showControls ? "translate-y-0" : "translate-y-full"
-        )
-      } >
-        <Button
-          variant={isMuted ? "destructive" : "secondary"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={toggleMute}
-        >
-          {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-        </Button>
-
-        <Button
-          variant={localVideoOn ? "secondary" : "destructive"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={toggleCamera}
-        >
-          {localVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-        </Button>
-
-        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowMorePanel(true)}>
-          <Settings className="w-5 h-5" />
-        </Button>
-
-        <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowParticipantsPanel(true)}>
-          <Users className="w-5 h-5" />
-        </Button>
-
-        <Button
-          variant={showChatPanel ? "default" : "secondary"}
-          size="icon"
-          className="rounded-full w-12 h-12"
-          onClick={() => setShowChatPanel(!showChatPanel)}
-        >
-          <MessageSquare className="w-5 h-5" />
-        </Button>
-
-        <div className="w-px h-8 bg-border mx-2" />
-
-        <Button
-          variant="destructive"
-          className="rounded-full px-6 h-12 font-semibold bg-red-600 hover:bg-red-700"
-          onClick={handleEndCallClick}
-        >
-          End Call
-        </Button>
-      </div >
-
-
-      {/* Participants Panel (Modal) */}
-      {
-        showParticipantsPanel && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowParticipantsPanel(false)}>
-            <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xl font-bold">Participants ({participants.length + 1})</h3>
-                <Button variant="ghost" size="sm" onClick={() => setShowParticipantsPanel(false)}>Close</Button>
-              </div>
-
-              <div className="overflow-y-auto flex-1 space-y-2">
-                {/* Local User */}
-                <div className="flex items-center justify-between p-2 rounded-lg bg-secondary/50">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
-                      {session?.user?.name?.[0]?.toUpperCase() || 'ME'}
-                    </div>
-                    <span className="font-medium">{session?.user?.name || 'Me'} (You)</span>
-                  </div>
-                  <div className="flex gap-2">
-                    {isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
-                    {localVideoOn ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
-                  </div>
-                </div>
-
-                {/* Remote Users */}
-                {participants.map(p => (
-                  <div key={p.userId} className="flex items-center justify-between p-2 rounded-lg hover:bg-secondary/30">
-                    <div className="flex items-center gap-3">
-                      {p.avatar_url ? (
-                        <Image src={p.avatar_url} alt={p.username} width={32} height={32} className="rounded-full object-cover" />
-                      ) : (
-                        <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
-                          {p.username?.[0]?.toUpperCase()}
-                        </div>
-                      )}
-                      <span className="font-medium">{p.username}</span>
-                    </div>
-                    <div className="flex gap-2">
-                      {p.isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
-                      {p.hasVideo ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
-                    </div>
-                  </div>
+                {others.map(p => (
+                  <ParticipantCard
+                    key={p.userId}
+                    participant={p}
+                    isPinned={p.userId === pinnedUserId}
+                    className="min-w-[160px] md:min-w-0 md:h-32 lg:h-40 aspect-video flex-shrink-0"
+                    onRemoteVideoRef={handleRemoteVideoRef}
+                  />
                 ))}
               </div>
-            </div>
+            )}
           </div>
-        )
-      }
+        ) : (
+          // Grid View
+          <div className={cn(
+            "w-full h-full grid gap-4 p-4 overflow-y-auto auto-rows-fr",
+            (participants.length + 1) <= 1 ? "grid-cols-1" :
+              (participants.length + 1) <= 2 ? "grid-cols-1 md:grid-cols-2" :
+                (participants.length + 1) <= 4 ? "grid-cols-2" :
+                  (participants.length + 1) <= 9 ? "grid-cols-2 md:grid-cols-3" :
+                    "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
+          )}>
+            <ParticipantCard
+              participant={{ userId: 'local', username: session?.user?.name || 'Me', hasVideo: localVideoOn, isMuted: isMuted, avatar_url: session?.user?.image || undefined }}
+              isLocal={true}
+              localVideoOn={localVideoOn}
+              localStream={localStream}
+              isMuted={isMuted}
+              setLocalVideoRef={(el) => { localVideoRef.current = el; }}
+            />
+            {participants.map(p => (
+              <ParticipantCard
+                key={p.userId}
+                participant={p}
+                isPinned={p.userId === pinnedUserId}
+                onPin={(userId) => setPinnedUserId(pinnedUserId === userId ? null : userId)}
+                onRemoteVideoRef={handleRemoteVideoRef}
+              />
+            ))}
+          </div>
+        )}
+      </main>
 
-      {/* Settings / More Panel (Modal) */}
+      {/* Chat Panel (Right Sidebar) */}
       {
-        showMorePanel && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowMorePanel(false)}>
-            <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xl font-bold">Settings</h3>
-                <Button variant="ghost" size="sm" onClick={() => setShowMorePanel(false)}>Close</Button>
-              </div>
-
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Camera</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-secondary"
-                    value={selectedVideoDeviceId || ''}
-                    onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
-                  >
-                    {availableVideoDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Microphone</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-secondary"
-                    value={selectedAudioInputDeviceId || ''}
-                    onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}
-                  >
-                    {availableAudioInputDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Speaker</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-secondary"
-                    value={selectedAudioOutputDeviceId || ''}
-                    onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}
-                  >
-                    {availableAudioOutputDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="w-full flex items-center space-x-2 pt-2">
-                  <span title="Mic Volume">🎤</span>
-                  <input
-                    type="range" min="0" max="3" step="0.1" value={micVolume}
-                    onChange={(e) => setMicVolume(parseFloat(e.target.value))}
-                    className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
-                  />
-                  <span className="text-xs w-8 text-right">{(micVolume * 100).toFixed(0)}%</span>
-                </div>
-
-                <div className="w-full flex items-center space-x-2 pt-2">
-                  <span title="Speaker Volume">🔊</span>
-                  <input
-                    type="range" min="0" max="1" step="0.05" value={volume}
-                    onChange={(e) => setVolume(parseFloat(e.target.value))}
-                    className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
-                  />
-                  <span className="text-xs w-8 text-right">{(volume * 100).toFixed(0)}%</span>
-                </div>
-
-                <div className="flex items-center justify-between pt-4 border-t">
-                  <span className="text-sm font-medium">Exit Immediately</span>
-                  <input
-                    type="checkbox"
-                    className="w-5 h-5"
-                    checked={exitImmediately}
-                    onChange={handleExitImmediatelyChange}
-                  />
-                </div>
-
-                <Button className="w-full mt-4" onClick={copyLink}>
-                  {isLinkCopied ? 'Link Copied!' : 'Copy Meeting Link'}
-                </Button>
-              </div>
-            </div>
-          </div>
-        )
-      }
-
-      {/* End Call Modal */}
-      {
-        showEndCallModal && (
-          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
-            <div className="bg-card p-6 rounded-xl shadow-2xl max-w-sm w-full mx-4 border">
-              <h3 className="text-lg font-bold mb-2">Leave Meeting?</h3>
-              <p className="text-muted-foreground mb-6">Are you sure you want to leave this meeting?</p>
-              <div className="flex justify-end space-x-3">
-                <Button variant="outline" onClick={() => setShowEndCallModal(false)}>Cancel</Button>
-                <Button variant="destructive" onClick={leaveRoom}>Leave Meeting</Button>
-              </div>
-            </div>
-          </div>
+        showChatPanel && (
+          <ChatPanel
+            messages={chatMessages}
+            currentUserId={(session?.user as any)?.id || session?.user?.email}
+            newMessage={newMessage}
+            onNewMessageChange={setNewMessage}
+            onSendMessage={sendMessage}
+            onClose={() => setShowChatPanel(false)}
+          />
         )
       }
     </div >
-  );
+
+    {/* Control Bar Toggle Button */}
+    < div className="fixed bottom-4 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-300 flex flex-col items-center gap-4"
+      style={{ bottom: showControls ? '80px' : '20px' }}>
+
+      {showControls && (
+        <ReactionBar onReaction={handleSendReaction} />
+      )}
+
+      <Button
+        variant="secondary"
+        size="sm"
+        className="rounded-full shadow-lg bg-background/80 backdrop-blur-sm border hover:bg-background"
+        onClick={() => setShowControls(!showControls)}
+      >
+        {showControls ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+      </Button>
+    </div >
+
+    {/* Control Bar */}
+    < div className={
+      cn(
+        "fixed bottom-0 left-0 right-0 h-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-t z-40 transition-transform duration-300 ease-in-out flex items-center justify-center space-x-4",
+        showControls ? "translate-y-0" : "translate-y-full"
+      )
+    } >
+      <Button
+        variant={isMuted ? "destructive" : "secondary"}
+        size="icon"
+        className="rounded-full w-12 h-12"
+        onClick={toggleMute}
+      >
+        {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+      </Button>
+
+      <Button
+        variant={localVideoOn ? "secondary" : "destructive"}
+        size="icon"
+        className="rounded-full w-12 h-12"
+        onClick={toggleCamera}
+      >
+        {localVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+      </Button>
+
+      <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowMorePanel(true)}>
+        <Settings className="w-5 h-5" />
+      </Button>
+
+      <Button variant="secondary" size="icon" className="rounded-full w-12 h-12" onClick={() => setShowParticipantsPanel(true)}>
+        <Users className="w-5 h-5" />
+      </Button>
+
+      <Button
+        variant={showChatPanel ? "default" : "secondary"}
+        size="icon"
+        className="rounded-full w-12 h-12"
+        onClick={() => setShowChatPanel(!showChatPanel)}
+      >
+        <MessageSquare className="w-5 h-5" />
+      </Button>
+
+      <div className="w-px h-8 bg-border mx-2" />
+
+      <Button
+        variant="destructive"
+        className="rounded-full px-6 h-12 font-semibold bg-red-600 hover:bg-red-700"
+        onClick={handleEndCallClick}
+      >
+        End Call
+      </Button>
+    </div >
+
+
+    {/* Participants Panel (Modal) */}
+    {
+      showParticipantsPanel && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowParticipantsPanel(false)}>
+          <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold">Participants ({participants.length + 1})</h3>
+              <Button variant="ghost" size="sm" onClick={() => setShowParticipantsPanel(false)}>Close</Button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 space-y-2">
+              {/* Local User */}
+              <div className="flex items-center justify-between p-2 rounded-lg bg-secondary/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
+                    {session?.user?.name?.[0]?.toUpperCase() || 'ME'}
+                  </div>
+                  <span className="font-medium">{session?.user?.name || 'Me'} (You)</span>
+                </div>
+                <div className="flex gap-2">
+                  {isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
+                  {localVideoOn ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
+                </div>
+              </div>
+
+              {/* Remote Users */}
+              {participants.map(p => (
+                <div key={p.userId} className="flex items-center justify-between p-2 rounded-lg hover:bg-secondary/30">
+                  <div className="flex items-center gap-3">
+                    {p.avatar_url ? (
+                      <Image src={p.avatar_url} alt={p.username} width={32} height={32} className="rounded-full object-cover" />
+                    ) : (
+                      <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
+                        {p.username?.[0]?.toUpperCase()}
+                      </div>
+                    )}
+                    <span className="font-medium">{p.username}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    {p.isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
+                    {p.hasVideo ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    {/* Settings / More Panel (Modal) */}
+    {
+      showMorePanel && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowMorePanel(false)}>
+          <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border" onClick={e => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold">Settings</h3>
+              <Button variant="ghost" size="sm" onClick={() => setShowMorePanel(false)}>Close</Button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Camera</label>
+                <select
+                  className="w-full p-2 border rounded-md bg-secondary"
+                  value={selectedVideoDeviceId || ''}
+                  onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
+                >
+                  {availableVideoDevices.map(device => (
+                    <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Microphone</label>
+                <select
+                  className="w-full p-2 border rounded-md bg-secondary"
+                  value={selectedAudioInputDeviceId || ''}
+                  onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}
+                >
+                  {availableAudioInputDevices.map(device => (
+                    <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Speaker</label>
+                <select
+                  className="w-full p-2 border rounded-md bg-secondary"
+                  value={selectedAudioOutputDeviceId || ''}
+                  onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}
+                >
+                  {availableAudioOutputDevices.map(device => (
+                    <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="w-full flex items-center space-x-2 pt-2">
+                <span title="Mic Volume">🎤</span>
+                <input
+                  type="range" min="0" max="3" step="0.1" value={micVolume}
+                  onChange={(e) => setMicVolume(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
+                />
+                <span className="text-xs w-8 text-right">{(micVolume * 100).toFixed(0)}%</span>
+              </div>
+
+              <div className="w-full flex items-center space-x-2 pt-2">
+                <span title="Speaker Volume">🔊</span>
+                <input
+                  type="range" min="0" max="1" step="0.05" value={volume}
+                  onChange={(e) => setVolume(parseFloat(e.target.value))}
+                  className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
+                />
+                <span className="text-xs w-8 text-right">{(volume * 100).toFixed(0)}%</span>
+              </div>
+
+              <div className="flex items-center justify-between pt-4 border-t">
+                <span className="text-sm font-medium">Exit Immediately</span>
+                <input
+                  type="checkbox"
+                  className="w-5 h-5"
+                  checked={exitImmediately}
+                  onChange={handleExitImmediatelyChange}
+                />
+              </div>
+
+              <Button className="w-full mt-4" onClick={copyLink}>
+                {isLinkCopied ? 'Link Copied!' : 'Copy Meeting Link'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    {/* End Call Modal */}
+    {
+      showEndCallModal && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
+          <div className="bg-card p-6 rounded-xl shadow-2xl max-w-sm w-full mx-4 border">
+            <h3 className="text-lg font-bold mb-2">Leave Meeting?</h3>
+            <p className="text-muted-foreground mb-6">Are you sure you want to leave this meeting?</p>
+            <div className="flex justify-end space-x-3">
+              <Button variant="outline" onClick={() => setShowEndCallModal(false)}>Cancel</Button>
+              <Button variant="destructive" onClick={leaveRoom}>Leave Meeting</Button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+  </div >
+);
 }
