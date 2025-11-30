@@ -564,12 +564,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         const mediaRecorder = new MediaRecorder(stream, options);
 
         mediaRecorder.ondataavailable = (event) => {
-          console.log(`[MediaRecorder] ondataavailable triggered, data size: ${event.data?.size || 0}`);
+          // console.log(`[MediaRecorder] ondataavailable triggered, data size: ${event.data?.size || 0}`);
           if (event.data && event.data.size > 0 && socketRef.current) {
-            console.log(`[MediaRecorder] Emitting media-chunk, size: ${event.data.size}, mimeType: ${mimeType}`);
+            // console.log(`[MediaRecorder] Emitting media-chunk, size: ${event.data.size}, mimeType: ${mimeType}`);
             socketRef.current.emit('media-chunk', { chunk: event.data, mimeType });
           } else {
-            console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
+            // console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
           }
         };
         mediaRecorderRef.current = mediaRecorder;
