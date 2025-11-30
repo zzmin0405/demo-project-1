@@ -1010,7 +1010,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       }
     }
-  }, [participants]); // Re-create if participants change, but that's okay.
+  }, []); // REMOVED participants dependency to prevent re-creation on every state change
 
   return (
     <div
