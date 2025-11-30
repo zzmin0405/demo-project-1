@@ -59,6 +59,7 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                             (videoRef as any).current = el;
                             if (el && localStream) {
                                 el.srcObject = localStream;
+                                el.muted = true;
                             }
                         }}
                         autoPlay

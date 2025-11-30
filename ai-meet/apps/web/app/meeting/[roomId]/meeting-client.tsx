@@ -496,6 +496,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     if (localStream && localVideoRef.current) {
       console.log('[useEffect srcObject] Setting srcObject...');
       localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.muted = true;
       console.log('[useEffect srcObject] srcObject set successfully');
     }
   }, [localStream, localVideoOn]);
