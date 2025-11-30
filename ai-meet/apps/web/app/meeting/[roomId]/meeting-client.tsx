@@ -568,8 +568,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           }
         };
         mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(1000);
-        console.log('Client: MediaRecorder started');
+        mediaRecorder.start(100); // 100ms for smoother video
+        console.log('Client: MediaRecorder started with 100ms intervals');
       } catch (e) {
         console.error('MediaRecorder setup failed:', e);
       }
