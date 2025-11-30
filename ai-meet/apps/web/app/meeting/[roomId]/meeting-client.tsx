@@ -1092,366 +1092,394 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   // --- Render Logic ---
   const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
   const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
+
   return (
-    <div
-      className="flex flex-col h-screen bg-background text-foreground overflow-hidden relative"
-      onMouseMove={() => {
-        if (showControls) {
-          resetControlsTimer();
-        }
-      }}
-      onClick={() => {
-        if (showControls) {
-          setShowControls(false);
-          if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
-        } else {
-          setShowControls(true);
-          resetControlsTimer();
-        }
-      }}
-    >
+    <div className="fixed inset-0 bg-background text-foreground overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row h-full">
+        {/* Click Handler Overlay for Controls Toggle */}
+        <div
+          className="absolute inset-0 z-0"
+          onClick={() => {
+            if (showControls) {
+              setShowControls(false);
+              if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+            } else {
+              setShowControls(true);
+              resetControlsTimer();
+            }
+          }}
+          onMouseMove={() => {
+            if (showControls) {
+              resetControlsTimer();
+            }
+          }}
+        />
 
-      {/* Main Video Grid */}
-      <div className={cn(
-        "flex-1 w-full h-full p-4 transition-all duration-500 ease-in-out",
-        layoutMode === 'speaker' ? "flex items-center justify-center relative" : "grid gap-4 auto-rows-fr",
-        layoutMode === 'grid' && (participants.length + 1) === 1 && "flex items-center justify-center",
-        layoutMode === 'grid' && (participants.length + 1) === 2 && "grid-cols-1 md:grid-cols-2",
-        layoutMode === 'grid' && (participants.length + 1) >= 3 && "grid-cols-2 md:grid-cols-3",
-      )}>
+        <main className="flex-1 bg-neutral-900 relative p-4 pb-20 md:pb-4 flex items-center justify-center transition-all duration-300 overflow-hidden group min-h-0">
 
-        {/* Local User */}
+          {/* Top Bar (View Switcher & Title) */}
+          <div
+            onMouseEnter={handleControlsMouseEnter}
+            onMouseLeave={handleControlsMouseLeave}
+            className={cn(
+              "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
+              showControls ? "translate-y-0" : "-translate-y-full"
+            )}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
+              {isEditingTitle ? (
+                <Input
+                  autoFocus
+                  value={tempTitle}
+                  onChange={(e) => setTempTitle(e.target.value)}
+                  onBlur={handleTitleUpdate}
+                  onKeyDown={(e) => e.key === 'Enter' && handleTitleUpdate()}
+                  className="h-6 w-48 bg-transparent border-none text-white focus-visible:ring-0 p-0"
+                />
+              ) : (
+                <span
+                  onClick={() => {
+                    if (isHost) {
+                      setTempTitle(meetingTitle);
+                      setIsEditingTitle(true);
+                    }
+                  }}
+                  className={cn("font-semibold px-2", isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
+                  title={isHost ? "Click to edit title" : undefined}
+                >
+                  {meetingTitle}
+                </span>
+              )}
+              {isHost && !isEditingTitle && (
+                <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
+                  setTempTitle(meetingTitle);
+                  setIsEditingTitle(true);
+                }} />
+              )}
+              <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
+            </div>
+
+            <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
+              <Button
+                variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
+                size="sm"
+                className={cn("text-white hover:bg-white/20", layoutMode === 'speaker' ? "" : "bg-transparent")}
+                onClick={() => setLayoutMode('speaker')}
+              >
+                <Maximize className="w-4 h-4 mr-2" /> Speaker
+              </Button>
+              <Button
+                variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
+                size="sm"
+                className={cn("text-white hover:bg-white/20", layoutMode === 'grid' ? "bg-secondary" : "bg-transparent")}
+                onClick={() => setLayoutMode('grid')}
+              >
+                <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
+              </Button>
+            </div>
+          </div>
+
+          {/* Main Video Grid */}
+          <div className={cn(
+            "w-full h-full grid gap-2 p-2 md:gap-4 md:p-4 pt-14 min-h-0",
+            layoutMode === 'speaker' ? "grid-cols-1 grid-rows-1" : "auto-rows-fr",
+            layoutMode === 'grid' && (participants.length + 1) === 1 && "flex items-center justify-center", // Single user centered
+            layoutMode === 'grid' && (participants.length + 1) === 2 && "grid-cols-1 md:grid-cols-2",
+            layoutMode === 'grid' && (participants.length + 1) >= 3 && "grid-cols-2 md:grid-cols-3",
+          )}>
+
+            {/* Local User */}
+            <div className={cn(
+              "relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all min-h-0",
+              layoutMode === 'speaker' ? (
+                mainSpeaker?.userId === currentUserId
+                  ? "w-full h-full" // Local user is main speaker
+                  : "absolute bottom-24 right-4 w-48 h-36 z-30 !border-white/20 !shadow-lg" // Local user is PIP
+              ) : "w-full h-full" // Grid mode
+            )}>
+              <ParticipantCard
+                participant={{ userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn }}
+                isLocal={true}
+                localStream={localStreamRef.current}
+                localVideoOn={localVideoOn}
+                isPinned={pinnedUserId === currentUserId}
+                onPin={() => setPinnedUserId(pinnedUserId === currentUserId ? null : currentUserId)}
+              />
+            </div>
+
+            {/* Remote Users */}
+            {participants.map(p => (
+              <div key={p.userId} className={cn(
+                "relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all min-h-0",
+                layoutMode === 'speaker' ? (
+                  mainSpeaker?.userId === p.userId
+                    ? "w-full h-full" // Remote user is main speaker
+                    : "hidden" // Hide others in speaker mode
+                ) : "w-full h-full" // Grid mode
+              )}>
+                <ParticipantCard
+                  participant={p}
+                  isLocal={false}
+                  onRemoteVideoRef={handleRemoteVideoRef}
+                  isPinned={pinnedUserId === p.userId}
+                  onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
+                />
+              </div>
+            ))}
+          </div>
+
+          {/* Reaction Overlay */}
+          <ReactionOverlay reactions={reactions} />
+
+          {/* Reaction Bar (Floating) */}
+          <div className={cn(
+            "absolute bottom-24 left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-300",
+            showControls ? "opacity-100" : "opacity-0 pointer-events-none"
+          )}>
+            <ReactionBar onReaction={(emoji) => {
+              if (socketRef.current) {
+                socketRef.current.emit('reaction', { roomId, emoji });
+                // Optimistic update
+                const newReaction: Reaction = {
+                  id: Math.random().toString(36).substr(2, 9),
+                  emoji,
+                  userId: currentUserId
+                };
+                setReactions(prev => [...prev, newReaction]);
+                setTimeout(() => {
+                  setReactions(prev => prev.filter(r => r.id !== newReaction.id));
+                }, 2000);
+              }
+            }} />
+          </div>
+
+          {/* Control Bar */}
+          <div
+            onMouseEnter={handleControlsMouseEnter}
+            onMouseLeave={handleControlsMouseLeave}
+            className={cn(
+              "fixed z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-2 md:space-x-4 shadow-2xl",
+              // Mobile Styles: Bottom fixed, full width, black background
+              "bottom-0 left-0 right-0 h-16 bg-black border-t border-white/10 rounded-none px-4",
+              // Desktop Styles: Floating pill, centered, rounded
+              "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:h-auto md:bg-black/80 md:backdrop-blur-xl md:border md:rounded-full md:px-6 md:py-3 md:w-auto",
+              showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
+            )}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Button
+              variant={isMuted ? "destructive" : "secondary"}
+              size="icon"
+              className="rounded-full w-10 h-10 md:w-12 md:h-12"
+              onClick={toggleMute}
+            >
+              {isMuted ? <MicOff className="w-4 h-4 md:w-5 md:h-5" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
+            </Button>
+            <Button
+              variant={localVideoOn ? "secondary" : "destructive"}
+              size="icon"
+              className="rounded-full w-10 h-10 md:w-12 md:h-12"
+              onClick={toggleCamera}
+            >
+              {localVideoOn ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
+            </Button>
+            <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowMorePanel(true)}>
+              <Settings className="w-4 h-4 md:w-5 md:h-5" />
+            </Button>
+            <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowParticipantsPanel(true)}>
+              <Users className="w-4 h-4 md:w-5 md:h-5" />
+            </Button>
+            <Button
+              variant={showChatPanel ? "default" : "secondary"}
+              size="icon"
+              className="rounded-full w-10 h-10 md:w-12 md:h-12"
+              onClick={() => setShowChatPanel(!showChatPanel)}
+            >
+              <MessageSquare className="w-4 h-4 md:w-5 md:h-5" />
+            </Button>
+            <div className="w-px h-6 md:h-8 bg-white/20 mx-1 md:mx-2" />
+            <Button
+              variant="destructive"
+              className="rounded-full px-4 md:px-6 h-10 md:h-12 font-semibold bg-red-600 hover:bg-red-700 text-sm md:text-base"
+              onClick={handleEndCallClick}
+            >
+              End
+            </Button>
+          </div>
+
+        </main>
+
+        {/* Chat Panel (Responsive) */}
         <div className={cn(
-          "relative transition-all duration-500 ease-in-out overflow-hidden rounded-xl shadow-lg border border-white/10 bg-black/40",
-          layoutMode === 'speaker' ? (
-            mainSpeaker?.userId === currentUserId
-              ? "w-full h-full max-w-5xl aspect-video z-10" // Local user is main speaker
-              : "absolute bottom-24 right-4 w-48 h-36 z-30" // Local user is PIP
-          ) : "w-full h-full" // Grid mode
+          "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
+          showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
         )}>
-          <ParticipantCard
-            participant={{ userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn }}
-            isLocal={true}
-            localStream={localStreamRef.current}
-            localVideoOn={localVideoOn}
-            isPinned={pinnedUserId === currentUserId}
-            onPin={() => setPinnedUserId(pinnedUserId === currentUserId ? null : currentUserId)}
+          <ChatPanel
+            messages={chatMessages}
+            currentUserId={(session?.user as any)?.id || session?.user?.email}
+            newMessage={newMessage}
+            onNewMessageChange={setNewMessage}
+            onSendMessage={sendMessage}
+            onClose={() => setShowChatPanel(false)}
           />
         </div>
 
-        {/* Remote Users */}
-        {participants.map(p => (
-          <div key={p.userId} className={cn(
-            "relative transition-all duration-500 ease-in-out overflow-hidden rounded-xl shadow-lg border border-white/10 bg-black/40",
-            layoutMode === 'speaker' ? (
-              mainSpeaker?.userId === p.userId
-                ? "w-full h-full max-w-5xl aspect-video z-10" // Remote user is main speaker
-                : "hidden" // Hide others in speaker mode (they remain mounted!)
-            ) : "w-full h-full" // Grid mode
-          )}>
-            <ParticipantCard
-              participant={p}
-              isLocal={false}
-              onRemoteVideoRef={handleRemoteVideoRef}
-              isPinned={pinnedUserId === p.userId}
-              onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
-            />
-          </div>
-        ))}
-      </div>
-
-      {/* Top Bar (View Switcher) */}
-      <div
-        onMouseEnter={handleControlsMouseEnter}
-        onMouseLeave={handleControlsMouseLeave}
-        className={cn(
-          "absolute top-0 left-0 right-0 p-4 z-20 flex justify-between items-start transition-transform duration-300",
-          showControls ? "translate-y-0" : "-translate-y-full"
-        )}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="bg-black/60 backdrop-blur-md p-2 rounded-lg text-white text-sm font-medium flex items-center gap-2">
-          {isEditingTitle ? (
-            <Input
-              autoFocus
-              value={tempTitle}
-              onChange={(e) => setTempTitle(e.target.value)}
-              onBlur={handleTitleUpdate}
-              onKeyDown={(e) => e.key === 'Enter' && handleTitleUpdate()}
-              className="h-6 w-48 bg-transparent border-none text-white focus-visible:ring-0 p-0"
-            />
-          ) : (
-            <span
-              onClick={() => {
-                if (isHost) {
-                  setTempTitle(meetingTitle);
-                  setIsEditingTitle(true);
-                }
-              }}
-              className={cn(isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
-              title={isHost ? "Click to edit title" : undefined}
-            >
-              {meetingTitle}
-            </span>
-          )}
-          {
-            isHost && !isEditingTitle && (
-              <Edit2 className="w-3 h-3 text-muted-foreground cursor-pointer hover:text-white transition-colors" onClick={() => {
-                setTempTitle(meetingTitle);
-                setIsEditingTitle(true);
-              }} />
-            )
-          }
-          <span className="text-xs text-muted-foreground ml-2 border-l border-white/20 pl-2">ID: {roomId}</span>
-        </div >
-        <div className="bg-black/60 backdrop-blur-md p-1 rounded-lg flex gap-1">
-          <Button
-            variant={layoutMode === 'speaker' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="text-white hover:bg-white/20"
-            onClick={() => setLayoutMode('speaker')}
-          >
-            <Maximize className="w-4 h-4 mr-2" /> Speaker
-          </Button>
-          <Button
-            variant={layoutMode === 'grid' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="text-white hover:bg-white/20"
-            onClick={() => setLayoutMode('grid')}
-          >
-            <LayoutGrid className="w-4 h-4 mr-2" /> Gallery
-          </Button>
-        </div>
-      </div >
-
-      {/* Control Bar - Responsive (Fixed Bottom on Mobile, Floating Pill on Desktop) */}
-      < div
-        onMouseEnter={handleControlsMouseEnter}
-        onMouseLeave={handleControlsMouseLeave}
-        className={
-          cn(
-            "fixed z-50 transition-all duration-300 ease-in-out flex items-center justify-center space-x-2 md:space-x-4 shadow-2xl",
-            // Mobile Styles: Bottom fixed, full width, black background
-            "bottom-0 left-0 right-0 h-16 bg-black border-t border-white/10 rounded-none px-4",
-            // Desktop Styles: Floating pill, centered, rounded
-            "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:h-auto md:bg-black/80 md:backdrop-blur-xl md:border md:rounded-full md:px-6 md:py-3 md:w-auto",
-            showControls ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0 pointer-events-none"
-          )
-        }
-        onClick={(e) => e.stopPropagation()}
-      >
-        <Button
-          variant={isMuted ? "destructive" : "secondary"}
-          size="icon"
-          className="rounded-full w-10 h-10 md:w-12 md:h-12"
-          onClick={toggleMute}
-        >
-          {isMuted ? <MicOff className="w-4 h-4 md:w-5 md:h-5" /> : <Mic className="w-4 h-4 md:w-5 md:h-5" />}
-        </Button>
-        <Button
-          variant={localVideoOn ? "secondary" : "destructive"}
-          size="icon"
-          className="rounded-full w-10 h-10 md:w-12 md:h-12"
-          onClick={toggleCamera}
-        >
-          {localVideoOn ? <Video className="w-4 h-4 md:w-5 md:h-5" /> : <VideoOff className="w-4 h-4 md:w-5 md:h-5" />}
-        </Button>
-        <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowMorePanel(true)}>
-          <Settings className="w-4 h-4 md:w-5 md:h-5" />
-        </Button>
-        <Button variant="secondary" size="icon" className="rounded-full w-10 h-10 md:w-12 md:h-12" onClick={() => setShowParticipantsPanel(true)}>
-          <Users className="w-4 h-4 md:w-5 md:h-5" />
-        </Button>
-        <Button
-          variant={showChatPanel ? "default" : "secondary"}
-          size="icon"
-          className="rounded-full w-10 h-10 md:w-12 md:h-12"
-          onClick={() => setShowChatPanel(!showChatPanel)}
-        >
-          <MessageSquare className="w-4 h-4 md:w-5 md:h-5" />
-        </Button>
-        <div className="w-px h-6 md:h-8 bg-white/20 mx-1 md:mx-2" />
-        <Button
-          variant="destructive"
-          className="rounded-full px-4 md:px-6 h-10 md:h-12 font-semibold bg-red-600 hover:bg-red-700 text-sm md:text-base"
-          onClick={handleEndCallClick}
-        >
-          End
-        </Button>
-      </div >
-
-
-      {/* Chat Panel (Responsive) */}
-      < div className={
-        cn(
-          "fixed inset-x-0 bottom-0 z-50 bg-background border-t border-border transition-transform duration-300 ease-in-out md:relative md:inset-auto md:border-l md:border-t-0 md:w-80 md:translate-y-0 flex flex-col shadow-2xl md:shadow-none rounded-t-2xl md:rounded-none overflow-hidden",
-          showChatPanel ? "translate-y-0 h-[60vh] md:h-auto" : "translate-y-full h-0 md:h-auto md:hidden md:w-0"
-        )
-      } >
-        <ChatPanel
-          messages={chatMessages}
-          currentUserId={(session?.user as any)?.id || session?.user?.email}
-          newMessage={newMessage}
-          onNewMessageChange={setNewMessage}
-          onSendMessage={sendMessage}
-          onClose={() => setShowChatPanel(false)}
-        />
-      </div >
-
-      {/* Participants Panel (Modal) */}
-      {
-        showParticipantsPanel && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowParticipantsPanel(false)}>
-            <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xl font-bold">Participants ({participants.length + 1})</h3>
-                <Button variant="ghost" size="sm" onClick={() => setShowParticipantsPanel(false)}>Close</Button>
-              </div>
-
-              <div className="overflow-y-auto flex-1 space-y-2">
-                {/* Local User */}
-                <div className="flex items-center justify-between p-2 rounded-lg bg-secondary/50">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
-                      {session?.user?.name?.[0]?.toUpperCase() || 'ME'}
-                    </div>
-                    <span className="font-medium">{session?.user?.name || 'Me'} (You)</span>
-                  </div>
-                  <div className="flex gap-2">
-                    {isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
-                    {localVideoOn ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
-                  </div>
+        {/* Participants Panel (Modal) */}
+        {
+          showParticipantsPanel && (
+            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowParticipantsPanel(false)}>
+              <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-xl font-bold">Participants ({participants.length + 1})</h3>
+                  <Button variant="ghost" size="sm" onClick={() => setShowParticipantsPanel(false)}>Close</Button>
                 </div>
 
-                {/* Remote Users */}
-                {participants.map(p => (
-                  <div key={p.userId} className="flex items-center justify-between p-2 rounded-lg hover:bg-secondary/30">
+                <div className="overflow-y-auto flex-1 space-y-2">
+                  {/* Local User */}
+                  <div className="flex items-center justify-between p-2 rounded-lg bg-secondary/50">
                     <div className="flex items-center gap-3">
-                      {p.avatar_url ? (
-                        <Image src={p.avatar_url} alt={p.username} width={32} height={32} className="rounded-full object-cover" />
-                      ) : (
-                        <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
-                          {p.username?.[0]?.toUpperCase()}
-                        </div>
-                      )}
-                      <span className="font-medium">{p.username}</span>
+                      <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
+                        {session?.user?.name?.[0]?.toUpperCase() || 'ME'}
+                      </div>
+                      <span className="font-medium">{session?.user?.name || 'Me'} (You)</span>
                     </div>
                     <div className="flex gap-2">
-                      {p.isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
-                      {p.hasVideo ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
+                      {isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
+                      {localVideoOn ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
                     </div>
                   </div>
-                ))}
+
+                  {/* Remote Users */}
+                  {participants.map(p => (
+                    <div key={p.userId} className="flex items-center justify-between p-2 rounded-lg hover:bg-secondary/30">
+                      <div className="flex items-center gap-3">
+                        {p.avatar_url ? (
+                          <Image src={p.avatar_url} alt={p.username} width={32} height={32} className="rounded-full object-cover" />
+                        ) : (
+                          <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
+                            {p.username?.[0]?.toUpperCase()}
+                          </div>
+                        )}
+                        <span className="font-medium">{p.username}</span>
+                      </div>
+                      <div className="flex gap-2">
+                        {p.isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
+                        {p.hasVideo ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
-        )
-      }
+          )
+        }
 
-      {/* Settings / More Panel (Modal) */}
-      {
-        showMorePanel && (
-          <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowMorePanel(false)}>
-            <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xl font-bold">Settings</h3>
-                <Button variant="ghost" size="sm" onClick={() => setShowMorePanel(false)}>Close</Button>
-              </div>
-
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Camera</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-secondary"
-                    value={selectedVideoDeviceId || ''}
-                    onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
-                  >
-                    {availableVideoDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
-                    ))}
-                  </select>
+        {/* Settings / More Panel (Modal) */}
+        {
+          showMorePanel && (
+            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowMorePanel(false)}>
+              <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border" onClick={e => e.stopPropagation()}>
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-xl font-bold">Settings</h3>
+                  <Button variant="ghost" size="sm" onClick={() => setShowMorePanel(false)}>Close</Button>
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Microphone</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-secondary"
-                    value={selectedAudioInputDeviceId || ''}
-                    onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}
-                  >
-                    {availableAudioInputDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
-                    ))}
-                  </select>
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Camera</label>
+                    <select
+                      className="w-full p-2 border rounded-md bg-secondary"
+                      value={selectedVideoDeviceId || ''}
+                      onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
+                    >
+                      {availableVideoDevices.map(device => (
+                        <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Microphone</label>
+                    <select
+                      className="w-full p-2 border rounded-md bg-secondary"
+                      value={selectedAudioInputDeviceId || ''}
+                      onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}
+                    >
+                      {availableAudioInputDevices.map(device => (
+                        <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Speaker</label>
+                    <select
+                      className="w-full p-2 border rounded-md bg-secondary"
+                      value={selectedAudioOutputDeviceId || ''}
+                      onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}
+                    >
+                      {availableAudioOutputDevices.map(device => (
+                        <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="w-full flex items-center space-x-2 pt-2">
+                    <span title="Mic Volume">🎤</span>
+                    <input
+                      type="range" min="0" max="3" step="0.1" value={micVolume}
+                      onChange={(e) => setMicVolume(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
+                    />
+                    <span className="text-xs w-8 text-right">{(micVolume * 100).toFixed(0)}%</span>
+                  </div>
+
+                  <div className="w-full flex items-center space-x-2 pt-2">
+                    <span title="Speaker Volume">🔊</span>
+                    <input
+                      type="range" min="0" max="1" step="0.05" value={volume}
+                      onChange={(e) => setVolume(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
+                    />
+                    <span className="text-xs w-8 text-right">{(volume * 100).toFixed(0)}%</span>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-4 border-t">
+                    <span className="text-sm font-medium">Exit Immediately</span>
+                    <input
+                      type="checkbox"
+                      className="w-5 h-5"
+                      checked={exitImmediately}
+                      onChange={handleExitImmediatelyChange}
+                    />
+                  </div>
+
+                  <Button className="w-full mt-4" onClick={copyLink}>
+                    {isLinkCopied ? 'Link Copied!' : 'Copy Meeting Link'}
+                  </Button>
                 </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium">Speaker</label>
-                  <select
-                    className="w-full p-2 border rounded-md bg-secondary"
-                    value={selectedAudioOutputDeviceId || ''}
-                    onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}
-                  >
-                    {availableAudioOutputDevices.map(device => (
-                      <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="w-full flex items-center space-x-2 pt-2">
-                  <span title="Mic Volume">🎤</span>
-                  <input
-                    type="range" min="0" max="3" step="0.1" value={micVolume}
-                    onChange={(e) => setMicVolume(parseFloat(e.target.value))}
-                    className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
-                  />
-                  <span className="text-xs w-8 text-right">{(micVolume * 100).toFixed(0)}%</span>
-                </div>
-
-                <div className="w-full flex items-center space-x-2 pt-2">
-                  <span title="Speaker Volume">🔊</span>
-                  <input
-                    type="range" min="0" max="1" step="0.05" value={volume}
-                    onChange={(e) => setVolume(parseFloat(e.target.value))}
-                    className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
-                  />
-                  <span className="text-xs w-8 text-right">{(volume * 100).toFixed(0)}%</span>
-                </div>
-
-                <div className="flex items-center justify-between pt-4 border-t">
-                  <span className="text-sm font-medium">Exit Immediately</span>
-                  <input
-                    type="checkbox"
-                    className="w-5 h-5"
-                    checked={exitImmediately}
-                    onChange={handleExitImmediatelyChange}
-                  />
-                </div>
-
-                <Button className="w-full mt-4" onClick={copyLink}>
-                  {isLinkCopied ? 'Link Copied!' : 'Copy Meeting Link'}
-                </Button>
-              </div>
-            </div>
-          </div>
-        )
-      }
-
-      {/* End Call Modal */}
-      {
-        showEndCallModal && (
-          <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
-            <div className="bg-card p-6 rounded-xl shadow-2xl max-w-sm w-full mx-4 border">
-              <h3 className="text-lg font-bold mb-2">Leave Meeting?</h3>
-              <p className="text-muted-foreground mb-6">Are you sure you want to leave this meeting?</p>
-              <div className="flex justify-end space-x-3">
-                <Button variant="outline" onClick={() => setShowEndCallModal(false)}>Cancel</Button>
-                <Button variant="destructive" onClick={leaveRoom}>Leave Meeting</Button>
               </div>
             </div>
-          </div>
-        )
-      }
-    </div >
+          )
+        }
+
+        {/* End Call Modal */}
+        {
+          showEndCallModal && (
+            <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
+              <div className="bg-card p-6 rounded-xl shadow-2xl max-w-sm w-full mx-4 border">
+                <h3 className="text-lg font-bold mb-2">Leave Meeting?</h3>
+                <p className="text-muted-foreground mb-6">Are you sure you want to leave this meeting?</p>
+                <div className="flex justify-end space-x-3">
+                  <Button variant="outline" onClick={() => setShowEndCallModal(false)}>Cancel</Button>
+                  <Button variant="destructive" onClick={leaveRoom}>Leave Meeting</Button>
+                </div>
+              </div>
+            </div>
+          )
+        }
+      </div>
+    </div>
   );
 }
