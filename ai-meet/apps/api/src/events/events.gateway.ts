@@ -28,13 +28,27 @@ interface Participant {
   },
 })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  constructor(private prisma: PrismaService) { }
-
   @WebSocketServer()
   server: Server;
 
   private roomToUsers = new Map<string, Map<string, Participant>>(); // roomId -> Map<socketId, Participant>
   private userIdToRoom = new Map<string, string>(); // userId -> roomId
+
+  constructor(private prisma: PrismaService) {
+    // Debug: Dump Server State every 10 seconds
+    setInterval(() => {
+      console.log('--- [Server State Dump] ---');
+      this.roomToUsers.forEach((users, roomId) => {
+        console.log(`Room ${roomId}: ${users.size} users`);
+        users.forEach((p, socketId) => {
+          const socket = this.server.sockets.sockets.get(socketId);
+          const authUser = socket ? socket['user']?.sub : 'N/A';
+          console.log(`  - User: ${p.username} (${p.userId}) | Socket: ${socketId} | AuthUser: ${authUser}`);
+        });
+      });
+      console.log('---------------------------');
+    }, 10000);
+  }
 
   handleConnection(client: Socket, ...args: any[]) {
     const token = client.handshake.auth.token;
@@ -66,6 +80,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
     }
   }
+
+  @SubscribeMessage('chat-message')
   async handleChatMessage(client: Socket, data: { roomId: string; message: string }): Promise<void> {
     console.log(`[ChatDebug] Received message from ${client.id} for room ${data.roomId}: ${data.message}`);
     const userId = client['user']?.sub;
@@ -120,8 +136,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       avatar_url: participant.avatar_url
     });
   }
-
-
 
   private leaveRoom(client: Socket, silent: boolean = false) {
     for (const [roomId, users] of this.roomToUsers.entries()) {
@@ -190,7 +204,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const { roomId, username, avatar_url, hasVideo = false, isMuted = true } = data; // Default to false/true if not provided
     const userId = client['user'].sub; // Use the trusted userId from the guard
 
-    // Single Meeting Enforcement with Auto-Kick
     // Single Meeting Enforcement with Auto-Kick
     const existingRoomId = this.userIdToRoom.get(userId);
     if (existingRoomId) {
@@ -316,8 +329,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-
-
   public async leaveRoomByUserId(roomId: string, userId: string) {
     console.log(`[LeaveByUserId] Force leaving user ${userId} from room ${roomId}`);
 
@@ -356,8 +367,6 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
   }
-
-
 
   // WebRTC Signaling Handlers
   @SubscribeMessage('offer')
