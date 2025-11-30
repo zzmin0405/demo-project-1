@@ -304,34 +304,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  // Helper to force delete a room and kick everyone
-  public async forceDeleteRoom(roomId: string) {
-    console.log(`[ForceDelete] Deleting room ${roomId} and kicking all users.`);
 
-    // Notify all users in the room
-    this.server.to(roomId).emit('error', { message: '호스트가 회의를 종료했습니다.' });
-    this.server.to(roomId).emit('meeting-ended'); // Custom event for clean exit
-
-    // Disconnect all sockets in this room
-    const roomUsers = this.roomToUsers.get(roomId);
-    if (roomUsers) {
-      for (const socketId of roomUsers.keys()) {
-        const socket = this.server.sockets.sockets.get(socketId);
-        if (socket) {
-          socket.leave(roomId);
-          socket.disconnect(true);
-        }
-      }
-      this.roomToUsers.delete(roomId);
-    }
-
-    // Cleanup userId mapping
-    for (const [userId, rId] of this.userIdToRoom.entries()) {
-      if (rId === roomId) {
-        this.userIdToRoom.delete(userId);
-      }
-    }
-  }
 
   public async leaveRoomByUserId(roomId: string, userId: string) {
     console.log(`[LeaveByUserId] Force leaving user ${userId} from room ${roomId}`);
@@ -481,5 +454,32 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       userId: userId,
       emoji: data.emoji
     });
+  }
+
+  // Force delete room (called by Controller)
+  async forceDeleteRoom(roomId: string) {
+    console.log(`[EventsGateway] Force deleting room ${roomId}`);
+
+    // 1. Notify all users in the room
+    this.server.to(roomId).emit('error', { message: 'The host has ended the meeting.' });
+    this.server.to(roomId).emit('room-ended'); // Optional: specific event for clean exit
+
+    // 2. Disconnect all sockets in the room
+    const sockets = await this.server.in(roomId).fetchSockets();
+    for (const socket of sockets) {
+      socket.leave(roomId);
+      socket.disconnect(true);
+    }
+
+    // 3. Cleanup Maps
+    const room = this.roomToUsers.get(roomId);
+    if (room) {
+      for (const [socketId, participant] of room.entries()) {
+        this.userIdToRoom.delete(participant.userId);
+      }
+      this.roomToUsers.delete(roomId);
+    }
+
+    console.log(`[EventsGateway] Room ${roomId} deleted and users disconnected.`);
   }
 }

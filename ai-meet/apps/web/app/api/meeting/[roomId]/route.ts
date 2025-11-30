@@ -37,9 +37,9 @@ export async function DELETE(
         }
 
         // Call NestJS API to force delete and kick users
-        // FORCE CLOUDFLARE URL (Ignore env var for now to bypass old ngrok config)
-        const backendUrl = 'https://athletics-blackberry-hygiene-excluded.trycloudflare.com';
-        // const backendUrl = process.env.BACKEND_URL || 'https://athletics-blackberry-hygiene-excluded.trycloudflare.com';
+        // Use localhost for server-to-server communication to avoid DNS issues with Cloudflare Tunnel
+        const backendUrl = 'http://127.0.0.1:3001';
+        // const backendUrl = 'https://athletics-blackberry-hygiene-excluded.trycloudflare.com'; 
         const response = await fetch(`${backendUrl}/meetings/${roomId}`, {
             method: 'DELETE',
             headers: {
