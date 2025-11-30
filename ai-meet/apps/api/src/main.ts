@@ -1,29 +1,20 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
+import { NestExpressApplication, ExpressAdapter } from '@nestjs/platform-express';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, new ExpressAdapter());
   const configService = app.get(ConfigService);
   const corsOrigin = configService.get<string>('CORS_ORIGIN');
 
-  if (corsOrigin) {
-    app.enableCors({
-      origin: '*',
-      credentials: false,
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization'],
-    });
-    console.log(`CORS enabled for origins: ${corsOrigin}`);
-  } else {
-    app.enableCors({
-      origin: true,
-      credentials: true,
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization'],
-    });
-    console.log('CORS enabled for ALL origins (Development Mode)');
-  }
+  app.enableCors({
+    origin: '*',
+    credentials: false,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  });
+  console.log('CORS enabled for ALL origins (Global Override)');
   const port = configService.get<number>('PORT') || 3001;
   const jwtSecret = configService.get<string>('SUPABASE_JWT_SECRET');
 
