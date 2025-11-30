@@ -31,6 +31,7 @@ type LayoutMode = 'speaker' | 'grid';
 export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
   const { data: session, status } = useSession();
+  const currentUserId = session?.user?.id || session?.user?.email || 'anonymous';
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoOn, setLocalVideoOn] = useState(false);
