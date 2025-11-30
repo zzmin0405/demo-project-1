@@ -1,0 +1,100 @@
+﻿61b05bd ui: add click-to-show controls for immersive view - Hide controls by default - Click anywhere to toggle controls visibility - Fullscreen immersive experience
+63a4dc8 fix: correct buffer pruning with proper video element reference - Fix videoElement reference using remoteVideoRefs - Reduce buffer retention from 30s to 20s - Prevent QuotaExceededError
+573707a chore: remove noisy MediaRecorder logs for cleaner debugging
+de2bbed debug: add detailed logging for camera state changes - Track userId attribution in camera-state-changed events - Debug cross-contamination bug where wrong user's camera toggles
+f8e8040 fix: add buffer pruning to prevent memory overflow - Remove old buffered data (keep last 30 seconds) - Prevent video interruption during long sessions
+b81678d fix: reduce MediaRecorder interval to 100ms for smoother video - Prevent black screens from buffer starvation - Improve video continuity during playback
+83cde9b fix: recreate closed MediaSource to restore communication - Check MediaSource readyState in media-chunk handler - Cleanup and recreate if closed to enable video/audio after toggle
+a404f68 fix: clear stale Blob URL when MediaSource is closed - Always revoke and clear old src before checking readyState
+62acb69 fix: always refresh Blob URL on camera toggle - Always revoke old and create new ObjectURL when MediaSource exists
+9e98542 fix: prevent Blob URL errors on camera toggle
+9dfa8f0 fix: video overwrite and black screen issues
+52a058d fix: emergency restore of events.gateway.ts to fix syntax errors and corruption
+737ae3a fix: prevent user-left race condition on auto-kick to resolve video cutoff
+4c7e1c6 fix: remove duplicate handleMediaChunk implementation
+1e60959 fix: use authoritative userId in media-chunk to prevent identity confusion
+f499c1a fix: restart MediaRecorder on user join to send fresh init segment
+dc2b3d6 fix: add missing onRemoteVideoRef to Speaker View to enable remote video rendering
+5185531 fix: prevent ghost sockets and self-loopback of media chunks
+46aac86 fix: enforce muted=true on local video to prevent audio feedback
+5408b7a fix: wait for session before initializing socket to prevent anonymous user collisions
+785dd8c fix: restart MediaRecorder on camera toggle to prevent black screen
+a0cff65 fix: use currentUserId as auth token to prevent collisions
+28dfa29 fix: define currentUserId in component scope
+ae7248f fix: use correct userId for camera/mic toggle events
+11ee75e fix: ensure local video re-attaches on toggle
+b19ab02 fix: add missing socket.connect() call
+7da3181 fix: enforce global permissive CORS
+9e60484 fix: enable websocket transport and add debug logs
+9f24c30 fix: relax CORS settings for WebSocket gateway
+5e784e0 chore: update pnpm-lock.yaml for concurrently dependency
+46c3a3f fix: resolve syntax errors in meeting-client and update dev scripts
+e3cfa96 fix: use env vars for cloudflare url
+2ed27ae fix: resolve backend duplicate function and switch api to localhost
+19eca34 fix: resolve syntax error in meeting-client.tsx
+83ef385 fix: resolve syntax errors in media-chunk handler
+75c483a fix: optimize media latency (100ms chunk, catch-up logic) and robust userId lookup
+3096c26 fix: correctly pass local video props and ref setter to ParticipantCard
+7912d36 fix: debug local video display issues
+13eb183 fix: export ParticipantCard and resolve implicit any types
+f54ee8f fix: force video visibility update with inline styles
+91ae80a fix: implement late attach logic for media source
+c86d6d0 fix: resolve isPinned reference error
+fb89984 refactor: extract ParticipantCard to prevent video element remount
+950a084 fix: add camera-state listener and improve mimetype support
+a0f9178 fix: add async to sourceopen listener
+2ed5925 fix: resolve media streaming race condition
+1038818 fix: force cloudflare url in api route
+a1c9ce6 feat: migrate to cloudflare tunnel
+7d15752 fix: hardcode ngrok URL in API route to fix 500 error
+75298f2 fix: resolve 500 error and connection issues (ngrok/CORS)
+cb99a20 On feature/websocket-streaming: User debugging changes before switching to main
+95ca32f index on feature/websocket-streaming: d7f3e28 fix: hardcode allowed origins to fix persistent CORS
+d7f3e28 fix: hardcode allowed origins to fix persistent CORS
+cb8cacb fix: robust backend CORS (origin: true, credentials: true)
+711d05b FIX-add-socket-io
+ddd6790 fix: permissive CORS (origin: *) and polling-only transport
+8c5eff0 Fix: Add prisma generate to build script
+f23be69 Fix: Resolve build errors (any types, eslint directives)
+7ffe0c8 Fix: Remove duplicate handleMediaChunk
+b0637fa Fix: Add missing handleMediaChunk, autoplay fixes, and state sync
+014ac6c Fix: Resolve merge conflict in leave route
+84d9441 Merge feature/websocket-streaming into main
+de4c4b3 Fix: WebSocket media streaming, always-on strategy, and remote video playback
+67ce142 Fix
+693dd0d Fix
+c571f88 Fix
+6a676af Fix: Send correct video state on reconnect to prevent stream cleanup
+60018fd Fix: Set SourceBuffer mode to sequence to handle timestamp resets
+0fc3247 Fix: Hard reset MediaSource on Init Segment to prevent buffer header conflicts
+cf2c08b Fix: Use dynamic mimeType for SourceBuffer and improve error logging
+6f63680 Fix: Implement explicit Init Segment flagging to prevent SourceBuffer errors
+c40942c Fix: Restart MediaRecorder on user join to send Init Segment
+cce84aa Fix: Restart MediaRecorder on user join to send Init Segment
+e445314 Fix: Add race condition guards and safe cleanup
+9f6d560 Fix: Add safety checks for SourceBuffer append
+daa547a Fix: Remove extra argument from setupMediaSource
+aca97a9 Fix: Force Websocket transport and simplify video logic
+8c84931 Fix:Add ngrok header to API routes to bypass warning
+37542fb Fix:Add ngrok header to API routes to bypass warning
+218e412 Fix:Add ngrok header to API routes to bypass warning
+8ee456c Fix:Add ngrok header to API routes to bypass warning
+874c150 Fix:Add ngrok header to API routes to bypass warning
+19af61e Fix:Add ngrok header to API routes to bypass warning
+b5fe39b Fix:Add ngrok header to API routes to bypass warning
+8de4c36 Fix:Add ngrok header to API routes to bypass warning
+7ffce01 Fix:Add ngrok header to API routes to bypass warning
+3d1815d Fix:Add ngrok header to API routes to bypass warning
+75b2184 Fix:Add ngrok header to API routes to bypass warning
+27bb74f Fix:Add ngrok header to API routes to bypass warning
+d4ea85d Fix:Add ngrok header to API routes to bypass warning
+a286018 Fix:Add ngrok header to API routes to bypass warning
+a6ee42c Fix:Add ngrok header to API routes to bypass warning
+ddfe082 d
+40bd492 Update meeting-client.tsx
+dd1d041 d
+d828f48 Switch to permissive CORS (origin: *, credentials: false) to resolve persistent blocking
+78a293c Hardcode allowed CORS origins to fix persistent preflight errors
+56e18d6 Fix black screen by re-applying callback ref for reliable stream attachment
+1a55212 Fix redundant camera toggle logic
+1300bd5 Add debug logs for WebSocket connection URL
