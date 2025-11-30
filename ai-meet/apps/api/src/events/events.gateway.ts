@@ -37,7 +37,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private userIdToRoom = new Map<string, string>(); // userId -> roomId
 
   handleConnection(client: Socket, ...args: any[]) {
-    console.log(`Client connecting: ${client.id}`);
+    const token = client.handshake.auth.token;
+    const userId = client['user']?.sub || token; // Fallback if guard hasn't run yet (it should have)
+    console.log(`[ConnectionDebug] Client connected: ${client.id}, Token/UserId: ${userId}`);
   }
 
   handleDisconnect(client: Socket) {
@@ -45,8 +47,25 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.leaveRoom(client);
   }
 
+  @SubscribeMessage('media-chunk')
+  handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string } | any): void {
+    const roomId = Array.from(client.rooms).find(r => r !== client.id);
+    const userId = client['user']?.sub;
 
-  @SubscribeMessage('chat-message')
+    // console.log(`[MediaChunkDebug] Received from ${client.id} (User: ${userId}) for Room ${roomId}`);
+
+    if (roomId) {
+      const chunk = payload.chunk || payload;
+      const mimeType = payload.mimeType || 'video/webm; codecs="vp8, opus"';
+
+      client.to(roomId).emit('media-chunk', {
+        socketId: client.id,
+        userId: userId, // Explicitly send userId to prevent mapping errors
+        chunk: chunk,
+        mimeType: mimeType
+      });
+    }
+  }
   async handleChatMessage(client: Socket, data: { roomId: string; message: string }): Promise<void> {
     console.log(`[ChatDebug] Received message from ${client.id} for room ${data.roomId}: ${data.message}`);
     const userId = client['user']?.sub;
@@ -334,22 +353,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  @SubscribeMessage('media-chunk')
-  handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string } | any): void {
-    const roomId = Array.from(client.rooms).find(r => r !== client.id);
-    if (roomId) {
-      const chunk = payload.chunk || payload;
-      const mimeType = payload.mimeType || 'video/webm; codecs="vp8, opus"';
 
-      const userId = client['user']?.sub;
-      client.to(roomId).emit('media-chunk', {
-        socketId: client.id,
-        userId: userId, // Explicitly send userId to prevent mapping errors
-        chunk: chunk,
-        mimeType: mimeType
-      });
-    }
-  }
 
   // WebRTC Signaling Handlers
   @SubscribeMessage('offer')
