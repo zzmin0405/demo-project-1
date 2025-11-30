@@ -405,29 +405,26 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     initialize();
 
     return () => {
-      console.log('Client: useEffect cleanup');
-      mediaRecorderRef.current?.stop();
-      localStreamRef.current?.getTracks().forEach(track => track.stop());
-
-      // Cleanup Audio Context
-      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-        audioContextRef.current.close().catch(e => console.warn("Error closing AudioContext", e));
+      isInitialized.current = false;
+      if (socketRef.current) {
+        console.log('Client: Disconnecting socket on cleanup');
+        socketRef.current.disconnect();
+        socketRef.current = null;
       }
 
+      // Cleanup media sources
       Object.keys(mediaSourcesRef.current).forEach(socketId => {
         cleanupMediaSource(socketId);
       });
 
-      if (socketRef.current) {
-        socketRef.current.emit('leave-room'); // Notify server immediately on unmount
-        socketRef.current.disconnect();
-        socketRef.current = null;
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
       }
-      socketIdToUserIdMap.current = {};
-      setParticipants([]);
-      isInitialized.current = false; // Allow re-initialization on remount
+      if (audioContextRef.current) {
+        audioContextRef.current.close();
+      }
     };
-  }, [roomId, router, session, status]);
+  }, [roomId, status, currentUserId]);
 
   // Handle browser tab close / refresh
   useEffect(() => {
