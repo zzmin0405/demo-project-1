@@ -205,20 +205,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
-        socket.emit('join-room', {
-          roomId,
-          username,
-          avatar_url: session.user?.image,
-          hasVideo: false, // Will be updated after media init
-          isMuted: true // Will be updated after media init
-        });
 
-        // Initialize media stream after joining (or in parallel)
-        // We need to read the settings again or pass them. 
-        // Since we are inside initialize, we can read from sessionStorage if needed, 
-        // but it's better to rely on the state that was set by the first useEffect.
-        // However, state updates might not be reflected yet if this runs immediately.
-        // Let's read from sessionStorage directly here for safety.
+        // Calculate initial settings FIRST
         let initialVideoOn = false;
         let initialMuted = true;
 
@@ -230,6 +218,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
           }
         }
+
+        socket.emit('join-room', {
+          roomId,
+          username,
+          avatar_url: session.user?.image,
+          hasVideo: initialVideoOn, // Correct initial state
+          isMuted: initialMuted     // Correct initial state
+        });
 
         initializeMediaStream(initialVideoOn, initialMuted, true); // isInitial = true
 
