@@ -644,9 +644,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     if (userId && remoteVideoRefs.current[userId]) {
       const videoEl = remoteVideoRefs.current[userId];
       if (videoEl) {
-        URL.revokeObjectURL(videoEl.src);
+        const src = videoEl.src;
+        if (src && src.startsWith('blob:')) {
+          URL.revokeObjectURL(src);
+        }
         videoEl.src = '';
         videoEl.removeAttribute('src');
+        videoEl.load();
       }
     }
     delete mediaSourcesRef.current[socketId];
@@ -950,13 +954,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       remoteVideoRefs.current[userId] = el;
       const socketId = userIdToSocketIdMap.current[userId];
       if (socketId && mediaSourcesRef.current[socketId]) {
-        // Always try to attach if src is missing, or just ensure it plays
-        if (!el.src) {
-          console.log(`[VideoRef] Attaching MediaSource to ${userId}`);
-          el.src = URL.createObjectURL(mediaSourcesRef.current[socketId]);
+        const mediaSource = mediaSourcesRef.current[socketId];
+        if (mediaSource.readyState === 'closed') {
+          console.warn(`[VideoRef] MediaSource for ${userId} is closed, skipping`);
+          return;
         }
-        // Ensure it's playing
-        el.play().catch(e => console.error(`[VideoRef] Autoplay failed for ${userId}`, e));
+        if (!el.src) {
+          console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
+          el.src = URL.createObjectURL(mediaSource);
+        }
+        el.play().catch(e => {
+          if (e.name !== 'AbortError') {
+            console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
+          }
+        });
       }
     }
   }, [participants]); // Re-create if participants change, but that's okay.
