@@ -591,7 +591,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const videoElement = remoteVideoRefs.current[userId];
 
     if (videoElement) {
-      videoElement.src = URL.createObjectURL(mediaSource);
+      const url = URL.createObjectURL(mediaSource);
+      mediaSourceUrlsRef.current[socketId] = url;
+      videoElement.src = url;
       videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
     }
 
@@ -998,11 +1000,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   // --- Render Logic ---
 
-  // --- Render Logic ---
-
   const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
   const mainSpeaker = pinnedParticipant || participants[0]; // Default to first remote user if no pin
   const others = participants.filter(p => p.userId !== mainSpeaker?.userId);
+
+  const mediaSourceUrlsRef = useRef<{ [socketId: string]: string }>({}); // Track created Object URLs
 
   const handleRemoteVideoRef = useCallback((userId: string, el: HTMLVideoElement | null) => {
     console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
@@ -1011,16 +1013,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       const socketId = userIdToSocketIdMap.current[userId];
       if (socketId && mediaSourcesRef.current[socketId]) {
         const mediaSource = mediaSourcesRef.current[socketId];
+        const currentUrl = mediaSourceUrlsRef.current[socketId];
 
-        // If element already has a blob source and is not closed, skip re-attaching
-        if (el.src && el.src.startsWith('blob:') && mediaSource.readyState === 'open') {
-          console.log(`[VideoRef] Skipping re-attach for ${userId}, already has blob src`);
+        // STRICT CHECK: Only skip if the element is playing the EXACT SAME Blob URL
+        if (el.src && el.src === currentUrl && mediaSource.readyState === 'open') {
+          console.log(`[VideoRef] Skipping re-attach for ${userId}, already playing correct blob: ${currentUrl}`);
           return;
         }
 
         // Always clean up old Blob URL first
         const oldSrc = el.src;
-        if (oldSrc && oldSrc.startsWith('blob:')) {
+        if (oldSrc && oldSrc.startsWith('blob:') && oldSrc !== currentUrl) {
           URL.revokeObjectURL(oldSrc);
           el.src = '';
         }
@@ -1031,7 +1034,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
 
         console.log(`[VideoRef] Attaching MediaSource to ${userId} (readyState: ${mediaSource.readyState})`);
-        el.src = URL.createObjectURL(mediaSource);
+
+        // Create new URL if we don't have one or if we are re-attaching
+        let newUrl = currentUrl;
+        if (!newUrl) {
+          newUrl = URL.createObjectURL(mediaSource);
+          mediaSourceUrlsRef.current[socketId] = newUrl;
+        }
+
+        el.src = newUrl;
 
         el.play().catch(e => {
           if (e.name !== 'AbortError') {
