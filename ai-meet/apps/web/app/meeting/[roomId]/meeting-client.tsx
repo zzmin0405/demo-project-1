@@ -206,6 +206,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
+        console.log('Client: Calling initializeMediaStream from connect event...');
 
         // Calculate initial settings FIRST
         let initialVideoOn = false;
@@ -228,7 +229,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           isMuted: initialMuted     // Correct initial state
         });
 
-        initializeMediaStream(initialVideoOn, initialMuted, true); // isInitial = true
+        initializeMediaStream(initialVideoOn, initialMuted, true)
+          .then(() => console.log('Client: initializeMediaStream completed successfully.'))
+          .catch(err => console.error('Client: initializeMediaStream failed:', err));
 
       });
 
@@ -441,6 +444,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         console.log('Client: Disconnecting socket on cleanup');
         socketRef.current.disconnect();
         socketRef.current = null;
+      } else {
+        console.log('Client: Socket ref was null on cleanup');
       }
 
       // Cleanup media sources
@@ -819,6 +824,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       setLocalStream(stream);
       localStreamRef.current = stream;
+      console.log('Client: localStreamRef.current set:', !!localStreamRef.current, 'Tracks:', stream.getTracks().length);
       setLocalVideoOn(initialVideoOn);
       setIsMuted(initialMuted);
       console.log('Client: Media stream initialized (always-on mode).');
@@ -828,14 +834,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       // Emit initial camera state
       socketRef.current?.emit('camera-state-changed', {
         roomId,
-        userId: session?.user?.email,
+        userId: currentUserId,
         hasVideo: initialVideoOn
       });
 
       // Emit initial mic state
       socketRef.current?.emit('mic-state-changed', {
         roomId,
-        userId: session?.user?.email,
+        userId: currentUserId,
         isMuted: initialMuted
       });
 
@@ -866,6 +872,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const videoTrack = localStreamRef.current?.getVideoTracks()[0];
     if (!videoTrack) {
       console.warn('[toggleCamera] No video track available. Media stream not initialized.');
+      alert('카메라를 찾을 수 없거나 초기화되지 않았습니다.');
       return;
     }
 
@@ -888,6 +895,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const toggleMute = () => {
     if (!gainNodeRef.current) {
       console.warn('GainNode not available. Media stream not initialized.');
+      alert('마이크를 찾을 수 없거나 초기화되지 않았습니다.');
       return;
     }
 

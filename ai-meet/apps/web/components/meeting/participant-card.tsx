@@ -64,33 +64,26 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                     <video
                         key="local-video"
                         ref={(el) => {
-                            // Combine refs
                             if (setLocalVideoRef) setLocalVideoRef(el);
                             (videoRef as any).current = el;
-                            if (el && localStream) {
-                                el.srcObject = localStream;
-                                el.muted = true;
-                            }
                         }}
                         autoPlay
                         muted
                         playsInline
-                        className={cn("w-full h-full object-contain", localVideoOn ? 'block' : 'hidden')}
+                        className={cn("w-full h-full object-contain", localVideoOn ? "visible" : "invisible")}
                     />
                 ) : (
                     <video
                         key="remote-video"
                         ref={(el) => {
-                            if (el) {
-                                (videoRef as any).current = el;
-                                // Only call callback if it hasn't been handled by useEffect yet
-                                // Actually, useEffect is better.
+                            (videoRef as any).current = el;
+                            if (onRemoteVideoRef && !isLocal) {
+                                onRemoteVideoRef(participant.userId, el);
                             }
                         }}
                         autoPlay
                         playsInline
-                        className={cn("w-full h-full object-contain", participant.hasVideo ? 'block' : 'hidden')}
-                        style={{ display: participant.hasVideo ? 'block' : 'none' }}
+                        className={cn("w-full h-full object-contain", participant.hasVideo ? "visible" : "invisible")}
                     />
                 )}
 
