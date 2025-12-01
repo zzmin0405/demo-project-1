@@ -634,17 +634,32 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             }
           }
 
-          // Gap Detection and Jump Logic
-          if (sourceBuffer.buffered.length > 1 && videoElement) {
-            const currentTime = videoElement.currentTime;
-            for (let i = 0; i < sourceBuffer.buffered.length - 1; i++) {
-              const end = sourceBuffer.buffered.end(i);
-              const nextStart = sourceBuffer.buffered.start(i + 1);
-              // If we are near the end of a range (within 0.5s) or in the gap
-              if (currentTime >= end - 0.5 && currentTime < nextStart) {
-                console.log(`[Gap] Jumping from ${currentTime.toFixed(2)} to ${nextStart.toFixed(2)} for ${socketId}`);
-                videoElement.currentTime = nextStart;
-                break;
+          // Latency Management (Catch-up Logic)
+          if (videoElement && !videoElement.paused) {
+            const buffered = sourceBuffer.buffered;
+            if (buffered.length > 0) {
+              const end = buffered.end(buffered.length - 1);
+              const currentTime = videoElement.currentTime;
+              const latency = end - currentTime;
+
+              // 1. Gap Jumping (For large lags > 3s)
+              if (latency > 3) {
+                console.log(`[Latency] Jumping to live edge (Lag: ${latency.toFixed(2)}s)`);
+                videoElement.currentTime = end - 0.1;
+              }
+              // 2. Playback Rate Adjustment (For small lags 0.5s - 3s)
+              else if (latency > 0.5) {
+                if (videoElement.playbackRate !== 1.1) {
+                  console.log(`[Latency] Speeding up playback (Lag: ${latency.toFixed(2)}s)`);
+                  videoElement.playbackRate = 1.1;
+                }
+              }
+              // 3. Normal Playback
+              else {
+                if (videoElement.playbackRate !== 1.0) {
+                  console.log(`[Latency] Normal speed (Lag: ${latency.toFixed(2)}s)`);
+                  videoElement.playbackRate = 1.0;
+                }
               }
             }
           }
