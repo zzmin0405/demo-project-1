@@ -20,6 +20,7 @@ interface ParticipantCardProps {
     localVideoOn?: boolean;
     localStream?: MediaStream | null;
     isMuted?: boolean;
+    isSpeaking?: boolean;
     onPin?: (userId: string) => void;
     setLocalVideoRef?: (element: HTMLVideoElement | null) => void;
     onRemoteVideoRef?: (userId: string, element: HTMLVideoElement | null) => void;
@@ -33,17 +34,18 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
     localVideoOn,
     localStream,
     isMuted,
+    isSpeaking,
     onPin,
     setLocalVideoRef,
     onRemoteVideoRef
 }) => {
-    console.log(`[ParticipantCard] Render ${participant.userId} isLocal=${isLocal} localVideoOn=${localVideoOn} hasVideo=${participant.hasVideo}`);
+    // console.log(`[ParticipantCard] Render ${participant.userId} isLocal=${isLocal} localVideoOn=${localVideoOn} hasVideo=${participant.hasVideo}`);
 
     const videoRef = useRef<HTMLVideoElement>(null);
 
     useEffect(() => {
         if (isLocal && videoRef.current) {
-            console.log(`[ParticipantCard] Local Video Ref State: srcObject=${!!videoRef.current.srcObject}, paused=${videoRef.current.paused}, readyState=${videoRef.current.readyState}, style.display=${videoRef.current.style.display}`);
+            // console.log(`[ParticipantCard] Local Video Ref State: srcObject=${!!videoRef.current.srcObject}, paused=${videoRef.current.paused}, readyState=${videoRef.current.readyState}, style.display=${videoRef.current.style.display}`);
         }
     });
 
@@ -69,7 +71,11 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
     }, [onRemoteVideoRef, isLocal, participant.userId]);
 
     return (
-        <div className={cn("relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all", className)}>
+        <div className={cn(
+            "relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all",
+            isSpeaking && "ring-4 ring-green-500 border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.5)]",
+            className
+        )}>
             {/* Video / Avatar Area */}
             <div className="w-full h-full flex items-center justify-center bg-black/90">
                 {isLocal ? (

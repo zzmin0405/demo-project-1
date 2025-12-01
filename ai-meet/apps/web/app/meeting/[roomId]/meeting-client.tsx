@@ -94,6 +94,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [showMorePanel, setShowMorePanel] = useState(false);
   const [exitImmediately, setExitImmediately] = useState(false);
 
+  // Speaking Indicator State
+  const [speakingParticipants, setSpeakingParticipants] = useState<Set<string>>(new Set());
+  const analyserNodeRef = useRef<AnalyserNode | null>(null);
+  const speakingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const isSpeakingRef = useRef<boolean>(false);
+
   // Load initial settings from sessionStorage
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -399,6 +405,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setTimeout(() => {
           setReactions(prev => prev.filter(r => r.id !== newReaction.id));
         }, 2000);
+      });
+
+      socket.on('speaking-start', ({ userId }: { userId: string }) => {
+        setSpeakingParticipants(prev => new Set(prev).add(userId));
+      });
+
+      socket.on('speaking-stop', ({ userId }: { userId: string }) => {
+        setSpeakingParticipants(prev => {
+          const next = new Set(prev);
+          next.delete(userId);
+          return next;
+        });
       });
 
       socket.on('chat-error', (data: { message: string }) => {
@@ -842,6 +860,60 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       audioSourceRef.current = source;
       audioDestinationRef.current = destination;
 
+      // --- Speaking Detection Setup ---
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      analyserNodeRef.current = analyser;
+
+      if (speakingIntervalRef.current) clearInterval(speakingIntervalRef.current);
+
+      speakingIntervalRef.current = setInterval(() => {
+        if (!analyserNodeRef.current || isMuted) {
+          if (isSpeakingRef.current) {
+            isSpeakingRef.current = false;
+            socketRef.current?.emit('speaking-stop', { roomId, userId: currentUserId });
+            setSpeakingParticipants(prev => {
+              const next = new Set(prev);
+              next.delete(currentUserId);
+              return next;
+            });
+          }
+          return;
+        }
+
+        const bufferLength = analyserNodeRef.current.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+        analyserNodeRef.current.getByteFrequencyData(dataArray);
+
+        // Calculate average volume
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+
+        // Threshold for "speaking" (adjustable)
+        const threshold = 20;
+        const isNowSpeaking = average > threshold;
+
+        if (isNowSpeaking !== isSpeakingRef.current) {
+          isSpeakingRef.current = isNowSpeaking;
+          if (isNowSpeaking) {
+            socketRef.current?.emit('speaking-start', { roomId, userId: currentUserId });
+            setSpeakingParticipants(prev => new Set(prev).add(currentUserId));
+          } else {
+            socketRef.current?.emit('speaking-stop', { roomId, userId: currentUserId });
+            setSpeakingParticipants(prev => {
+              const next = new Set(prev);
+              next.delete(currentUserId);
+              return next;
+            });
+          }
+        }
+      }, 100); // Check every 100ms
+      // -------------------------------
+
       // Create a mixed stream for MediaRecorder (ALWAYS includes both audio and video)
       const processedAudioTrack = destination.stream.getAudioTracks()[0];
       const tracks: MediaStreamTrack[] = [...stream.getVideoTracks()];
@@ -1244,6 +1316,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 localVideoOn={localVideoOn}
                 isPinned={pinnedUserId === currentUserId}
                 onPin={() => setPinnedUserId(pinnedUserId === currentUserId ? null : currentUserId)}
+                isSpeaking={speakingParticipants.has(currentUserId)}
               />
             </div>
 
@@ -1263,6 +1336,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   onRemoteVideoRef={handleRemoteVideoRef}
                   isPinned={pinnedUserId === p.userId}
                   onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
+                  isSpeaking={speakingParticipants.has(p.userId)}
                 />
               </div>
             ))}

@@ -463,6 +463,16 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
+  @SubscribeMessage('speaking-start')
+  handleSpeakingStart(client: Socket, data: { roomId: string; userId: string }): void {
+    client.to(data.roomId).emit('speaking-start', { userId: data.userId });
+  }
+
+  @SubscribeMessage('speaking-stop')
+  handleSpeakingStop(client: Socket, data: { roomId: string; userId: string }): void {
+    client.to(data.roomId).emit('speaking-stop', { userId: data.userId });
+  }
+
   // Force delete room (called by Controller)
   async forceDeleteRoom(roomId: string) {
     console.log(`[EventsGateway] Force deleting room ${roomId}`);
