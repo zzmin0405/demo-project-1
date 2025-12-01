@@ -578,8 +578,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           }
         };
         mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(100); // 100ms for smoother video
-        console.log('Client: MediaRecorder started with 100ms intervals');
+        mediaRecorder.start(30); // 30ms for lower latency
+        console.log('Client: MediaRecorder started with 30ms intervals');
       } catch (e) {
         console.error('MediaRecorder setup failed:', e);
       }
@@ -634,17 +634,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             }
           }
 
-          // Gap Detection and Jump Logic
-          if (sourceBuffer.buffered.length > 1 && videoElement) {
-            const currentTime = videoElement.currentTime;
-            for (let i = 0; i < sourceBuffer.buffered.length - 1; i++) {
-              const end = sourceBuffer.buffered.end(i);
-              const nextStart = sourceBuffer.buffered.start(i + 1);
-              // If we are near the end of a range (within 0.5s) or in the gap
-              if (currentTime >= end - 0.5 && currentTime < nextStart) {
-                console.log(`[Gap] Jumping from ${currentTime.toFixed(2)} to ${nextStart.toFixed(2)} for ${socketId}`);
-                videoElement.currentTime = nextStart;
-                break;
+          // Gap Detection and Jump Logic (Aggressive Low Latency)
+          if (videoElement && !videoElement.paused) {
+            const buffered = sourceBuffer.buffered;
+            if (buffered.length > 0) {
+              const end = buffered.end(buffered.length - 1);
+              const currentTime = videoElement.currentTime;
+
+              // If we are more than 0.5s behind the live edge, jump to it
+              if (end - currentTime > 0.5) {
+                console.log(`[LowLatency] Jumping to live edge: ${currentTime.toFixed(2)} -> ${end.toFixed(2)} (Lag: ${(end - currentTime).toFixed(2)}s)`);
+                videoElement.currentTime = end - 0.05; // Jump to slightly before end
               }
             }
           }
