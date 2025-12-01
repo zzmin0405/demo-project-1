@@ -769,18 +769,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const initializeMediaStream = async (initialVideoOn: boolean = false, initialMuted: boolean = true, isInitial: boolean = false) => {
     try {
-      console.log(`Client: Initializing media stream (Always request audio+video, Initial video: ${initialVideoOn}, Initial muted: ${initialMuted})...`);
+      console.log(`Client: Initializing media stream (Initial video: ${initialVideoOn}, Initial muted: ${initialMuted})...`);
+
+      // 1. Check for available devices first
       const devices = await navigator.mediaDevices.enumerateDevices();
       const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      const hasVideoDevice = videoDevices.length > 0;
+
       setAvailableVideoDevices(videoDevices);
       setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
       setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
 
-      // Always request both video and audio
-      const videoConstraint: boolean | MediaTrackConstraints = selectedVideoDeviceId
-        ? { deviceId: { exact: selectedVideoDeviceId } }
-        : true;
+      console.log(`Client: Video devices found: ${videoDevices.length}`);
 
+      // 2. Construct constraints based on device availability
       const audioConstraint: boolean | MediaTrackConstraints = selectedAudioInputDeviceId
         ? {
           deviceId: { exact: selectedAudioInputDeviceId },
@@ -794,10 +796,27 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           autoGainControl: true
         };
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraint,
-        audio: audioConstraint
-      });
+      let stream: MediaStream;
+
+      if (hasVideoDevice) {
+        // Camera available: Request both
+        const videoConstraint: boolean | MediaTrackConstraints = selectedVideoDeviceId
+          ? { deviceId: { exact: selectedVideoDeviceId } }
+          : true;
+
+        console.log('Client: Requesting Audio + Video');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraint,
+          audio: audioConstraint
+        });
+      } else {
+        // No Camera: Request Audio Only
+        console.log('Client: No camera found. Requesting Audio Only.');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: false,
+          audio: audioConstraint
+        });
+      }
 
       // Set initial video track state based on user preference
       const videoTrack = stream.getVideoTracks()[0];
