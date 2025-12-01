@@ -517,14 +517,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   }, [micVolume]);
 
   // Use callback ref to set initial ref
-  const setLocalVideoRef = (element: HTMLVideoElement | null) => {
+  const setLocalVideoRef = useCallback((element: HTMLVideoElement | null) => {
     localVideoRef.current = element;
     if (element && localStream) {
       console.log('[Callback Ref] Setting srcObject...');
       element.srcObject = localStream;
       console.log('[Callback Ref] srcObject set successfully');
     }
-  };
+  }, [localStream]);
 
   // Also use useEffect to update when localStream changes
   useEffect(() => {

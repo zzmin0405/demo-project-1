@@ -56,6 +56,18 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
         }
     }, [isLocal, participant.userId, onRemoteVideoRef]);
 
+    const handleLocalVideoRef = React.useCallback((el: HTMLVideoElement | null) => {
+        if (setLocalVideoRef) setLocalVideoRef(el);
+        (videoRef as any).current = el;
+    }, [setLocalVideoRef]);
+
+    const handleRemoteVideoRef = React.useCallback((el: HTMLVideoElement | null) => {
+        (videoRef as any).current = el;
+        if (onRemoteVideoRef && !isLocal) {
+            onRemoteVideoRef(participant.userId, el);
+        }
+    }, [onRemoteVideoRef, isLocal, participant.userId]);
+
     return (
         <div className={cn("relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all", className)}>
             {/* Video / Avatar Area */}
@@ -63,10 +75,7 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                 {isLocal ? (
                     <video
                         key="local-video"
-                        ref={(el) => {
-                            if (setLocalVideoRef) setLocalVideoRef(el);
-                            (videoRef as any).current = el;
-                        }}
+                        ref={handleLocalVideoRef}
                         autoPlay
                         muted
                         playsInline
@@ -75,12 +84,7 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                 ) : (
                     <video
                         key="remote-video"
-                        ref={(el) => {
-                            (videoRef as any).current = el;
-                            if (onRemoteVideoRef && !isLocal) {
-                                onRemoteVideoRef(participant.userId, el);
-                            }
-                        }}
+                        ref={handleRemoteVideoRef}
                         autoPlay
                         playsInline
                         className={cn("w-full h-full object-contain", participant.hasVideo ? "visible" : "invisible")}
