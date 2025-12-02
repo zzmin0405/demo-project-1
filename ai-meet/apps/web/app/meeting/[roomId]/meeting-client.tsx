@@ -1290,56 +1290,87 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             </div>
           </div>
 
-          {/* Main Video Grid */}
-          <div className={cn(
-            "w-full h-full grid gap-2 p-2 md:gap-4 md:p-4 pt-14 min-h-0",
-            layoutMode === 'speaker' ? "grid-cols-1 grid-rows-1" : "auto-rows-[1fr]",
-            layoutMode === 'grid' && (participants.length + 1) === 1 && "grid-cols-1 grid-rows-1", // 1 User: Full screen
-            layoutMode === 'grid' && (participants.length + 1) === 2 && "grid-cols-1 md:grid-cols-2", // 2 Users: Stacked (Mobile) / Side-by-side (Desktop)
-            layoutMode === 'grid' && (participants.length + 1) === 3 && "grid-cols-1 md:grid-cols-2", // 3 Users: Stacked (Mobile) / 2x2 (Desktop)
-            layoutMode === 'grid' && (participants.length + 1) >= 4 && "grid-cols-2 md:grid-cols-2", // 4+ Users: 2x2 Grid
-          )}>
+          {/* Main Video Area */}
+          <div className="w-full h-full p-2 md:p-4 pt-14 min-h-0 flex flex-col">
 
-            {/* Local User */}
-            <div className={cn(
-              "relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all min-h-0",
-              layoutMode === 'speaker' ? (
-                mainSpeaker?.userId === currentUserId
-                  ? "w-full h-full" // Local user is main speaker
-                  : "absolute bottom-24 right-4 w-48 h-36 z-30 !border-white/20 !shadow-lg" // Local user is PIP
-              ) : "w-full h-full" // Grid mode
-            )}>
-              <ParticipantCard
-                participant={{ userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn }}
-                isLocal={true}
-                localStream={localStreamRef.current}
-                localVideoOn={localVideoOn}
-                isPinned={pinnedUserId === currentUserId}
-                onPin={() => setPinnedUserId(pinnedUserId === currentUserId ? null : currentUserId)}
-                isSpeaking={speakingParticipants.has(currentUserId)}
-              />
-            </div>
+            {layoutMode === 'grid' ? (
+              /* --- GRID VIEW (Smart Grid) --- */
+              <div className="flex-1 flex flex-wrap justify-center content-center gap-2 w-full h-full overflow-y-auto">
+                {[
+                  { userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn, isLocal: true },
+                  ...participants
+                ].map((p, index, array) => {
+                  const count = array.length;
+                  let gridClass = "w-full h-full"; // Default 1 user
 
-            {/* Remote Users */}
-            {participants.map(p => (
-              <div key={p.userId} className={cn(
-                "relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all min-h-0",
-                layoutMode === 'speaker' ? (
-                  mainSpeaker?.userId === p.userId
-                    ? "w-full h-full" // Remote user is main speaker
-                    : "hidden" // Hide others in speaker mode
-                ) : "w-full h-full" // Grid mode
-              )}>
-                <ParticipantCard
-                  participant={p}
-                  isLocal={false}
-                  onRemoteVideoRef={handleRemoteVideoRef}
-                  isPinned={pinnedUserId === p.userId}
-                  onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
-                  isSpeaking={speakingParticipants.has(p.userId)}
-                />
+                  if (count === 2) gridClass = "w-full md:w-[48%] h-[48%] md:h-full"; // 2 users: Stacked mobile, split desktop
+                  else if (count <= 4) gridClass = "w-[48%] h-[48%]"; // 3-4 users: 2x2
+                  else if (count <= 6) gridClass = "w-[48%] md:w-[32%] h-[32%] md:h-[48%]"; // 5-6 users: 2x3 or 3x2
+                  else if (count <= 9) gridClass = "w-[32%] h-[32%]"; // 7-9 users: 3x3
+                  else gridClass = "w-[48%] md:w-[24%] h-[24%]"; // 10+ users: 4x4ish
+
+                  return (
+                    <div key={p.userId} className={cn("relative transition-all duration-300 ease-in-out", gridClass)}>
+                      <ParticipantCard
+                        participant={p}
+                        isLocal={p.userId === currentUserId}
+                        localStream={p.userId === currentUserId ? localStreamRef.current : undefined}
+                        localVideoOn={p.userId === currentUserId ? localVideoOn : undefined}
+                        onRemoteVideoRef={p.userId !== currentUserId ? handleRemoteVideoRef : undefined}
+                        isPinned={pinnedUserId === p.userId}
+                        onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
+                        isSpeaking={speakingParticipants.has(p.userId)}
+                        className="w-full h-full"
+                      />
+                    </div>
+                  );
+                })}
               </div>
-            ))}
+            ) : (
+              /* --- SPEAKER VIEW (Filmstrip) --- */
+              <div className="flex-1 flex flex-col w-full h-full overflow-hidden gap-2">
+                {/* Main Stage (Active Speaker) */}
+                <div className="flex-1 relative w-full min-h-0 bg-black/20 rounded-lg overflow-hidden border border-white/10">
+                  <ParticipantCard
+                    participant={mainSpeaker?.userId === currentUserId
+                      ? { userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn }
+                      : mainSpeaker || { userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn }}
+                    isLocal={mainSpeaker?.userId === currentUserId}
+                    localStream={mainSpeaker?.userId === currentUserId ? localStreamRef.current : undefined}
+                    localVideoOn={mainSpeaker?.userId === currentUserId ? localVideoOn : undefined}
+                    onRemoteVideoRef={mainSpeaker?.userId !== currentUserId ? handleRemoteVideoRef : undefined}
+                    isPinned={pinnedUserId === (mainSpeaker?.userId)}
+                    onPin={() => setPinnedUserId(pinnedUserId === mainSpeaker?.userId ? null : mainSpeaker?.userId)}
+                    isSpeaking={speakingParticipants.has(mainSpeaker?.userId || '')}
+                    className="w-full h-full"
+                  />
+                </div>
+
+                {/* Filmstrip (Other Participants) */}
+                <div className="h-24 md:h-32 flex gap-2 overflow-x-auto overflow-y-hidden pb-2 px-1 flex-shrink-0 snap-x">
+                  {[
+                    { userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn, isLocal: true },
+                    ...participants
+                  ]
+                    .filter(p => p.userId !== mainSpeaker?.userId) // Exclude main speaker
+                    .map(p => (
+                      <div key={p.userId} className="w-32 md:w-48 h-full flex-shrink-0 snap-start">
+                        <ParticipantCard
+                          participant={p}
+                          isLocal={p.userId === currentUserId}
+                          localStream={p.userId === currentUserId ? localStreamRef.current : undefined}
+                          localVideoOn={p.userId === currentUserId ? localVideoOn : undefined}
+                          onRemoteVideoRef={p.userId !== currentUserId ? handleRemoteVideoRef : undefined}
+                          isPinned={pinnedUserId === p.userId}
+                          onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
+                          isSpeaking={speakingParticipants.has(p.userId)}
+                          className="w-full h-full border-2 border-transparent hover:border-primary/50 transition-all"
+                        />
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Reaction Overlay */}
