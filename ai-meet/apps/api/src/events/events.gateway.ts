@@ -201,7 +201,20 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const { roomId, username, avatar_url, hasVideo = false, isMuted = true } = data; // Default to false/true if not provided
-    const userId = client['user'].sub; // Use the trusted userId from the guard
+    let userId = client['user'].sub; // Use the trusted userId from the guard
+
+    // Resolve User ID if token is an email
+    if (userId.includes('@')) {
+      const user = await this.prisma.user.findUnique({ where: { email: userId } });
+      if (user) {
+        userId = user.id;
+        // CRITICAL FIX: Update the socket's user object so subsequent events (chat, etc.) use the correct UUID
+        client['user'].sub = userId;
+        console.log(`[Auth] Resolved email ${client['user'].email} to userId ${userId}`);
+      } else {
+        console.warn(`[Auth] User with email ${userId} not found in DB. Treating as guest/anonymous.`);
+      }
+    }
 
     // Single Meeting Enforcement with Auto-Kick
     const existingRoomId = this.userIdToRoom.get(userId);
@@ -471,6 +484,27 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @SubscribeMessage('speaking-stop')
   handleSpeakingStop(client: Socket, data: { roomId: string; userId: string }): void {
     client.to(data.roomId).emit('speaking-stop', { userId: data.userId });
+  }
+
+  @SubscribeMessage('stream-reset')
+  handleStreamReset(client: Socket, data: { roomId: string; userId: string }): void {
+    // Broadcast stream reset to other users so they can clear their buffers
+    client.to(data.roomId).emit('stream-reset', { userId: data.userId });
+  }
+
+  @SubscribeMessage('request-keyframe')
+  handleRequestKeyframe(client: Socket, data: { roomId: string; userId: string }): void {
+    // Forward the request to the specific user (data.userId is the TARGET, i.e., the sender)
+    // We need to find the socketId for this userId
+    const room = this.roomToUsers.get(data.roomId);
+    if (room) {
+      for (const [socketId, participant] of room.entries()) {
+        if (participant.userId === data.userId) {
+          this.server.to(socketId).emit('request-keyframe', { fromUserId: client['user']?.sub });
+          break;
+        }
+      }
+    }
   }
 
   // Force delete room (called by Controller)

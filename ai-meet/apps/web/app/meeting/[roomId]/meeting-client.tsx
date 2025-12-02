@@ -31,7 +31,22 @@ type LayoutMode = 'speaker' | 'grid';
 export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
   const { data: session, status } = useSession();
-  const currentUserId = session?.user?.id || session?.user?.email || 'anonymous';
+
+  // Generate a unique ID for guest users to prevent collisions
+  const [guestId, setGuestId] = useState<string>('');
+
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      let id = sessionStorage.getItem('guest-user-id');
+      if (!id) {
+        id = `guest-${Math.random().toString(36).substr(2, 9)}`;
+        sessionStorage.setItem('guest-user-id', id);
+      }
+      setGuestId(id);
+    }
+  }, [status]);
+
+  const currentUserId = session?.user?.id || session?.user?.email || guestId || 'initializing';
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoOn, setLocalVideoOn] = useState(false);
@@ -149,6 +164,26 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     setExitImmediately(savedSetting);
   }, []);
 
+  // Dynamic Device Detection
+  useEffect(() => {
+    const updateDevices = async () => {
+      try {
+        console.log('Client: Devices changed, re-enumerating...');
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setAvailableVideoDevices(devices.filter(device => device.kind === 'videoinput'));
+        setAvailableAudioInputDevices(devices.filter(device => device.kind === 'audioinput'));
+        setAvailableAudioOutputDevices(devices.filter(device => device.kind === 'audiooutput'));
+      } catch (err) {
+        console.error('Error re-enumerating devices:', err);
+      }
+    };
+
+    navigator.mediaDevices.addEventListener('devicechange', updateDevices);
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', updateDevices);
+    };
+  }, []);
+
   useEffect(() => {
     if (status === 'loading') return;
     if (!session?.user) {
@@ -163,7 +198,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const initialize = async () => {
       console.log('Client: Initializing...');
 
-      const currentUserId = (session.user as any).id || session.user?.email || 'unknown';
+      console.log('Client: Initializing...');
+
+      // Use the component-level currentUserId which handles session/guest logic
       console.log('Client: currentUser set to', currentUserId);
 
       const username = session.user?.name || session.user?.email || 'Anonymous';
@@ -450,6 +487,23 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         router.push('/');
       });
 
+      socket.on('stream-reset', ({ userId }: { userId: string }) => {
+        console.log(`[Client] Received stream-reset for ${userId}`);
+        const socketId = userIdToSocketIdMap.current[userId];
+        if (socketId) {
+          cleanupMediaSource(socketId);
+        }
+      });
+
+      socket.on('request-keyframe', () => {
+        console.log('[Client] Received request-keyframe. Restarting MediaRecorder...');
+        if (localStreamRef.current) {
+          // Notify others to reset their buffers because we are restarting the stream
+          socketRef.current?.emit('stream-reset', { roomId, userId: currentUserId });
+          setupMediaRecorder(localStreamRef.current);
+        }
+      });
+
       console.log('Client: Calling socket.connect()...');
       socket.connect();
     };
@@ -530,9 +584,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   // Update Mic Gain when micVolume changes
   useEffect(() => {
     if (gainNodeRef.current) {
-      gainNodeRef.current.gain.value = micVolume;
+      gainNodeRef.current.gain.value = isMuted ? 0 : micVolume;
     }
-  }, [micVolume]);
+  }, [micVolume, isMuted]);
 
   // Use callback ref to set initial ref
   const setLocalVideoRef = useCallback((element: HTMLVideoElement | null) => {
@@ -557,6 +611,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const setupMediaRecorder = (stream: MediaStream) => {
     if (mediaRecorderRef.current) {
+      // Prevent old recorder from firing 'ondataavailable' after we decide to switch
+      mediaRecorderRef.current.ondataavailable = null;
+      mediaRecorderRef.current.onstop = null;
       mediaRecorderRef.current.stop();
     }
     if (socketRef.current && stream) {
@@ -860,6 +917,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       audioSourceRef.current = source;
       audioDestinationRef.current = destination;
 
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+
       // --- Speaking Detection Setup ---
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
@@ -894,7 +955,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         const average = sum / bufferLength;
 
         // Threshold for "speaking" (adjustable)
-        const threshold = 20;
+        // Increased to 40 to reduce false positives from echo
+        const threshold = 40;
         const isNowSpeaking = average > threshold;
 
         if (isNowSpeaking !== isSpeakingRef.current) {
@@ -949,6 +1011,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         userId: currentUserId,
         isMuted: initialMuted
       });
+
+      // If not initial load (e.g. device switch), notify others to reset their buffers
+      if (!isInitial) {
+        console.log('Client: Device switched, emitting stream-reset');
+        socketRef.current?.emit('stream-reset', { roomId, userId: currentUserId });
+      }
 
     } catch (err: any) {
       console.error('Error accessing media devices:', err);
@@ -1150,6 +1218,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log(`[VideoRef] Callback for ${userId}, el: ${!!el}, src: ${el?.src}, srcObject: ${!!el?.srcObject}`);
     if (userId && el) {
       remoteVideoRefs.current[userId] = el;
+
+      // Apply selected audio output device
+      if (selectedAudioOutputDeviceId && typeof (el as any).setSinkId === 'function') {
+        try {
+          (el as any).setSinkId(selectedAudioOutputDeviceId);
+        } catch (e) {
+          console.error(`[VideoRef] Failed to set sinkId for ${userId}`, e);
+        }
+      }
+
       const socketId = userIdToSocketIdMap.current[userId];
 
       if (socketId && mediaSourcesRef.current[socketId]) {
@@ -1184,6 +1262,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           mediaSourceUrlsRef.current[socketId] = newUrl;
         }
 
+        // Force refresh if re-attaching (Layout Switch)
+        if (el.src !== newUrl) {
+          console.log(`[VideoRef] Requesting keyframe for ${userId} due to re-attach`);
+          socketRef.current?.emit('request-keyframe', { roomId, userId });
+        }
+
         el.src = newUrl;
 
         // Error Recovery Listener
@@ -1200,7 +1284,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       }
     }
-  }, []);
+  }, [selectedAudioOutputDeviceId]);
 
   // --- Render Logic ---
   const pinnedParticipant = participants.find(p => p.userId === pinnedUserId);
