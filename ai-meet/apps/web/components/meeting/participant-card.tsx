@@ -44,10 +44,11 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
     const videoRef = useRef<HTMLVideoElement>(null);
 
     useEffect(() => {
-        if (isLocal && videoRef.current) {
-            // console.log(`[ParticipantCard] Local Video Ref State: srcObject=${!!videoRef.current.srcObject}, paused=${videoRef.current.paused}, readyState=${videoRef.current.readyState}, style.display=${videoRef.current.style.display}`);
+        if (isLocal && videoRef.current && localStream) {
+            // console.log(`[ParticipantCard] Force attaching local stream`);
+            videoRef.current.srcObject = localStream;
         }
-    });
+    }, [isLocal, localStream]);
 
     // Handle remote video ref safely
     useEffect(() => {

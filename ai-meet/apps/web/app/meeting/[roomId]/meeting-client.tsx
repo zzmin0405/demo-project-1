@@ -590,6 +590,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   // Use callback ref to set initial ref
   const setLocalVideoRef = useCallback((element: HTMLVideoElement | null) => {
+    console.log('[setLocalVideoRef] Called with element:', !!element, 'localStream:', !!localStream);
     localVideoRef.current = element;
     if (element && localStream) {
       console.log('[Callback Ref] Setting srcObject...');
@@ -606,6 +607,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       localVideoRef.current.srcObject = localStream;
       localVideoRef.current.muted = true;
       console.log('[useEffect srcObject] srcObject set successfully');
+    } else {
+      console.log('[useEffect srcObject] Skipping. Missing stream or ref.');
     }
   }, [localStream, localVideoOn]);
 
@@ -649,7 +652,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             // console.log(`[MediaRecorder] Emitting media-chunk, size: ${event.data.size}, mimeType: ${mimeType}`);
             socketRef.current.emit('media-chunk', { chunk: event.data, mimeType });
           } else {
-            // console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
+            console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
           }
         };
         mediaRecorderRef.current = mediaRecorder;
@@ -825,6 +828,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     delete mediaSourcesRef.current[socketId];
     delete sourceBuffersRef.current[socketId];
     delete chunkQueueRef.current[socketId];
+
+    // Clear cached URL so we don't reuse a revoked one
+    if (mediaSourceUrlsRef.current[socketId]) {
+      delete mediaSourceUrlsRef.current[socketId];
+    }
   };
 
 
@@ -1277,11 +1285,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         };
         el.addEventListener('error', errorHandler, { once: true });
 
-        el.play().catch(e => {
+        el.play().then(() => {
+          console.log(`[VideoRef] Autoplay started for ${userId}`);
+        }).catch(e => {
           if (e.name !== 'AbortError') {
             console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
           }
         });
+      } else {
+        console.warn(`[VideoRef] No MediaSource found for ${userId} (socketId: ${socketId})`);
       }
     }
   }, [selectedAudioOutputDeviceId]);
