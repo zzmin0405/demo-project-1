@@ -15,10 +15,12 @@ export class MeetingsController {
             // 1. Force kick everyone
             await this.eventsGateway.forceDeleteRoom(id);
 
-            // 2. Delete related records manually (since Cascade is not set in schema)
-            await this.prisma.participant.deleteMany({ where: { meetingRoomId: id } });
-            await this.prisma.chatLog.deleteMany({ where: { meetingRoomId: id } });
-            await this.prisma.meetingSummary.deleteMany({ where: { meetingRoomId: id } });
+            // 2. Delete related records manually (Parallel Processing for Performance)
+            await Promise.all([
+                this.prisma.participant.deleteMany({ where: { meetingRoomId: id } }),
+                this.prisma.chatLog.deleteMany({ where: { meetingRoomId: id } }),
+                this.prisma.meetingSummary.deleteMany({ where: { meetingRoomId: id } }),
+            ]);
 
             // 3. Delete the room
             await this.prisma.meetingRoom.delete({

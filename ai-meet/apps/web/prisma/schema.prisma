@@ -73,6 +73,8 @@ model MeetingRoom {
   participants Participant[]
   chatLogs     ChatLog[]
   summaries    MeetingSummary[]
+
+  @@index([title])
 }
 
 model Participant {

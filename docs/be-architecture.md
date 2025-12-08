@@ -1,4 +1,4 @@
-# AI-Meet 프로젝트 시스템 문서 (2024.11.28 업데이트)
+# AI-Meet 프로젝트 시스템 문서 (2024.12.02 업데이트)
 
 > 이 문서는 현재 진행 중인 **AI-Meet** 프로젝트의 최신 아키텍처, 기술 스택, 시스템 상태 및 향후 계획을 기술합니다.
 
@@ -8,8 +8,9 @@
 
 ### 핵심 원칙
 - **아키텍처**: Next.js (Client) ↔ WebSocket (Socket.IO) ↔ NestJS (Backend) ↔ PostgreSQL (Prisma)
-- **실시간 통신**: WebRTC (Mesh/SFU Hybrid 지향), WebSocket을 통한 시그널링 및 채팅
-- **UI**: Next.js 14 (App Router), shadcn/ui, Tailwind CSS, Lucide React
+- **실시간 통신**: **WebSocket 기반 미디어 스트리밍** (MediaRecorder → Server → MediaSource Extensions)
+    - *참고: WebRTC P2P 방식이 아닌, 서버 릴레이 방식의 커스텀 스트리밍 구현*
+- **UI**: Next.js 15 (App Router), React 19, shadcn/ui, Tailwind CSS
 - **인증**: NextAuth.js (Google OAuth) + Prisma Adapter
 - **개발 환경**: pnpm Workspace (Monorepo), Windows OS
 
@@ -22,11 +23,12 @@
 ```mermaid
 graph TD
     Client[Next.js Client] -->|HTTP/REST| API[NestJS API]
-    Client -->|WebSocket| Gateway[Socket.IO Gateway]
-    Client -->|WebRTC| Peer[Peer Client]
+    Client -->|WebSocket (Signaling & Chat)| Gateway[Socket.IO Gateway]
+    Client -->|WebSocket (Media Stream)| Gateway
     
     API -->|Query/Mutation| DB[(PostgreSQL)]
     Gateway -->|Save Chat/Log| DB
+    Gateway -->|Relay Media| Client2[Other Clients]
     
     subgraph Backend
     API
@@ -45,27 +47,29 @@ graph TD
     *   설정(채팅 저장 여부 등)을 함께 저장합니다.
 
 3.  **실시간 통신 (Real-time)**:
-    *   **Signaling**: Socket.IO를 통해 `offer`, `answer`, `ice-candidate`를 교환합니다.
+    *   **Signaling**: Socket.IO를 통해 `join-room`, `leave-room`, `camera-state-changed` 등의 이벤트를 교환합니다.
+    *   **Media Streaming**:
+        *   **Sender**: `MediaRecorder` API를 사용하여 100ms~500ms 단위로 `WebM` 청크를 생성, `media-chunk` 이벤트로 서버에 전송합니다.
+        *   **Server**: 받은 청크를 해당 방의 다른 참가자들에게 즉시 브로드캐스트(Relay)합니다.
+        *   **Receiver**: `MediaSource Extensions (MSE)`를 사용하여 수신된 청크를 `SourceBuffer`에 추가하고 재생합니다.
     *   **Chat**: Socket.IO를 통해 메시지를 주고받으며, `isChatSaved` 설정에 따라 DB에 저장됩니다.
-    *   **Media**: WebRTC `RTCPeerConnection`을 통해 P2P로 영상/음성을 교환합니다.
 
 ### 4. AI 미디어 처리 파이프라인 (STT & 번역) - *Planned*
 
 ```mermaid
 graph LR
-    Client[Client Mic] -->|Audio Stream| Gateway[NestJS Gateway]
-    Gateway -->|Buffering| STT[STT Service]
-    STT -->|Text| Trans[Translation API]
+    Client[Client Mic] -->|Audio Stream (PCM)| Gateway[NestJS Gateway]
+    Gateway -->|Buffering| STT[STT Service (Whisper)]
+    STT -->|Text| Trans[Translation API (DeepL)]
     Trans -->|Subtitles| Gateway
     Gateway -->|Broadcast| Room[Meeting Room]
 ```
 
 1.  **오디오 스트리밍**:
-    *   클라이언트에서 발화자의 오디오를 텍스트 변환용으로 다운샘플링하여 WebSocket으로 전송합니다.
-    *   또는 WebRTC MediaServer(SFU) 도입 시 서버에서 직접 오디오를 추출합니다.
+    *   클라이언트 `AudioWorklet`에서 PCM 오디오 데이터를 추출하여 별도 채널로 전송합니다.
 2.  **STT (Speech-to-Text)**:
     *   **OpenAI Whisper** 또는 **Google Cloud STT** API를 사용하여 실시간으로 텍스트로 변환합니다.
-    *   비용 최적화를 위해 발화 감지(VAD) 시에만 API를 호출합니다.
+    *   비용 최적화를 위해 VAD(목소리 감지) 적용 예정.
 3.  **실시간 번역**:
     *   변환된 텍스트를 **DeepL** 또는 **Google Translate** API를 통해 타겟 언어로 번역합니다.
 4.  **자막 전송**:
@@ -73,38 +77,36 @@ graph LR
 
 ### 5. 네트워크 불안정 대응 전략 (Network Resilience)
 
-연결이 불안정하거나 대역폭이 낮을 때 사용자 경험을 유지하기 위한 전략입니다.
+TCP 기반 WebSocket 통신의 특성을 고려한 안정성 전략입니다.
 
-1.  **우선순위 제어 (Graceful Degradation)**:
-    *   **Audio First**: 대역폭이 부족하면 비디오를 먼저 끄고 오디오 품질을 최우선으로 유지합니다.
-    *   **Video Fallback**: 패킷 손실률(Packet Loss)이 5%를 넘으면 자동으로 저화질로 전환하거나 비디오를 일시 중단합니다.
+1.  **지연 보정 (Latency Compensation)**:
+    *   수신 측 버퍼가 일정 수준(3초) 이상 쌓이면 `playbackRate`를 높이거나 `currentTime`을 점프하여 실시간성을 유지합니다.
+2.  **재연결 로직 (Reconnection)**:
+    *   Socket.IO의 자동 재연결 기능을 활용하며, 재연결 시 `initializeMediaStream`을 재호출하여 미디어 전송을 복구합니다.
 
-2.  **적응형 비트레이트 (Adaptive Bitrate)**:
-    *   WebRTC의 기본 혼잡 제어(Congestion Control)를 활용하되, 클라이언트에서 `RTCPeerConnection.getStats()`를 주기적으로 모니터링하여 상황에 맞는 UI 알림을 제공합니다.
+---
 
-3.  **재연결 로직 (Reconnection)**:
-    *   `iceConnectionState`가 `disconnected` 또는 `failed`가 되면 즉시 **ICE Restart**를 시도합니다.
-    *   완전 끊김 시 3초 간격으로 소켓 재연결을 시도하며, "재연결 중..." 토스트를 표시합니다.
-
-### 2. 백엔드 구조 (NestJS)
+## 💻 백엔드 구조 (NestJS)
 
 *   **`apps/api`**:
     *   **`EventsGateway`**: WebSocket 이벤트를 처리하는 핵심 모듈.
         *   `handleConnection`: 클라이언트 접속 처리.
-        *   `handleJoinRoom`: 방 입장 처리 (DB 유효성 검사 포함).
+        *   `handleJoinRoom`: 방 입장 처리.
+        *   `handleMediaChunk`: **미디어 데이터 릴레이 (핵심)**.
         *   `handleChatMessage`: 채팅 메시지 중계 및 DB 저장.
-        *   `handleSignaling`: WebRTC 시그널링 중계.
     *   **`PrismaService`**: DB 접근을 위한 싱글톤 서비스.
 
-### 3. 프론트엔드 구조 (Next.js)
+---
+
+## 🖥️ 프론트엔드 구조 (Next.js)
 
 *   **`apps/web`**:
     *   **`app/page.tsx`**: 메인 랜딩 페이지. 회의 생성/참여 UI.
     *   **`app/meeting/[roomId]/meeting-client.tsx`**: 화상 회의 핵심 클라이언트.
-        *   WebRTC 연결 관리, 미디어 스트림 제어, 채팅 UI, 제어 바 등 포함.
-    *   **`components/create-meeting-modal.tsx`**: 회의 생성 모달 (설정 포함).
-    *   **`contexts/language-context.tsx`**: 다국어(I18n) 상태 관리.
-    *   **`lib/i18n/dictionaries.ts`**: 한/영 번역 데이터.
+        *   `MediaRecorder` (송신) 및 `MediaSource` (수신) 관리.
+        *   Socket.IO 이벤트 핸들링.
+    *   **`components/meeting/participant-card.tsx`**: 참가자 비디오/아바타 표시 컴포넌트.
+    *   **`components/create-meeting-modal.tsx`**: 회의 생성 모달.
 
 ---
 
@@ -113,36 +115,31 @@ graph LR
 ### ✅ 구현 완료 (Completed)
 
 1.  **기반 시스템**:
-    *   Next.js + NestJS 모노레포 환경 구축.
-    *   PostgreSQL + Prisma ORM 연동.
-    *   NextAuth.js 기반 구글 로그인.
+    *   Next.js + NestJS 모노레포 환경.
+    *   PostgreSQL + Prisma ORM.
+    *   NextAuth.js 구글 로그인.
 
 2.  **화상 회의 핵심**:
-    *   WebRTC 기반 P2P 화상 통화.
+    *   **WebSocket 기반 미디어 스트리밍** (WebRTC 아님).
     *   마이크/카메라 토글, 장치 선택.
-    *   실시간 채팅 (Socket.IO).
+    *   실시간 채팅.
 
 3.  **회의 관리 및 UX**:
-    *   **회의 생성 모달**: "Zoom 스타일" UI, 채팅 저장/입장 시 음소거 등 옵션 설정.
-    *   **제어 바**: 마우스 오버 시 자동 숨김 -> 수동 토글 버튼으로 변경.
-    *   **다국어 지원 (I18n)**: 한국어/영어 전환 기능.
-    *   **방 유효성 검사**: 존재하지 않는 방 ID로 접근 차단.
+    *   회의 생성 및 설정 (채팅 저장 등).
+    *   반응형 레이아웃 (Speaker/Grid 모드).
+    *   다국어 지원 (I18n).
 
 ### 🚧 진행 중 / 예정 (In Progress / Planned)
 
 **Phase 3: 완성도 향상 (Polish & Interactive)**
-1.  **회의 제목 변경**: 호스트가 회의 중 제목을 실시간으로 변경.
-2.  **이모지 반응 (Emoji Reactions)**: 화면에 떠오르는 이모지 애니메이션.
-3.  **토스트 알림**: 입장/퇴장, 에러 등을 예쁜 팝업으로 표시.
-
-**Future Roadmap**
-*   **AI 기능 (STT & 번역)**:
-    *   실시간 자막 생성 (OpenAI Whisper / Google STT).
-    *   다국어 실시간 번역 자막.
-    *   회의록 자동 요약 (LLM 활용).
-*   **화면 공유 (Screen Sharing)**: `getDisplayMedia` 활용.
-*   **참가자 관리**: 강제 퇴장, 음소거 제어 (호스트 권한).
-*   **대기실 (Waiting Room)**: 호스트 승인 후 입장.
+1.  **디스코드 스타일 미디어 토글**:
+    *   즉각적인 UI 반응 (검은 화면 제거).
+    *   키프레임 강제 전송을 통한 딜레이 최소화.
+2.  **스마트 그리드 레이아웃**:
+    *   참가자 수에 따른 빈 공간 최소화.
+    *   Filmstrip 뷰 (발표자 모드 개선).
+3.  **AI 기능 (STT & 번역)**:
+    *   실시간 자막 및 번역 파이프라인 구축.
 
 ---
 
@@ -153,33 +150,29 @@ graph LR
 |---|---|
 | `DATABASE_URL` | PostgreSQL 데이터베이스 연결 문자열 |
 | `PORT` | API 서버 포트 (기본: 3001) |
-| `OPENAI_API_KEY` | (예정) STT 및 요약 기능을 위한 OpenAI 키 |
-| `GOOGLE_TRANSLATE_KEY` | (예정) 번역 기능을 위한 구글 API 키 |
 
 ### 프론트엔드 (`apps/web/.env`)
 | 변수명 | 설명 |
 |---|---|
-| `DATABASE_URL` | Prisma용 DB 연결 문자열 (백엔드와 동일) |
+| `DATABASE_URL` | Prisma용 DB 연결 문자열 |
 | `NEXTAUTH_SECRET` | NextAuth 세션 암호화 키 |
-| `NEXTAUTH_URL` | 앱의 기본 URL (예: http://localhost:3000) |
+| `NEXTAUTH_URL` | 앱의 기본 URL |
 | `GOOGLE_CLIENT_ID` | 구글 OAuth 클라이언트 ID |
 | `GOOGLE_CLIENT_SECRET` | 구글 OAuth 클라이언트 시크릿 |
 | `NEXT_PUBLIC_API_URL` | 백엔드 API 주소 |
 
 ---
 
-## �️ 데이터베이스 스키마 (Prisma)
+## 🗄️ 데이터베이스 스키마 (Prisma)
 
 ```prisma
 model User {
   id            String    @id @default(cuid())
   name          String?
   email         String?   @unique
-  emailVerified DateTime?
   image         String?
-  accounts      Account[]
-  sessions      Session[]
   createdRooms  MeetingRoom[] @relation("CreatedRooms")
+  // ... NextAuth fields
 }
 
 model MeetingRoom {
@@ -187,13 +180,9 @@ model MeetingRoom {
   title       String
   creatorId   String
   creator     User     @relation("CreatedRooms", fields: [creatorId], references: [id])
-  currentMode String   @default("FREE")
   isChatSaved Boolean  @default(true)
   createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
   participants Participant[]
   chatLogs     ChatLog[]
 }
-
-// ... (Account, Session, VerificationToken, Participant, ChatLog 등)
 ```

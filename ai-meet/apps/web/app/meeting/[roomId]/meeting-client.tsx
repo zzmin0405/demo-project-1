@@ -360,20 +360,26 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           return;
         }
 
-        // Update map for reference, but rely on payload userId
+        // Update map for reference
         socketIdToUserIdMap.current[socketId] = userId;
         userIdToSocketIdMap.current[userId] = socketId;
 
+        // Ensure MediaSource is open
         if (!mediaSourcesRef.current[socketId] || mediaSourcesRef.current[socketId].readyState === 'closed') {
           if (mediaSourcesRef.current[socketId]) {
-            console.log(`[MediaChunk] MediaSource for ${socketId} is closed, recreating...`);
             cleanupMediaSource(socketId);
           }
           setupMediaSource(userId, socketId, mimeType);
         }
 
-        // Re-check loopback for existing sources (Safety)
-        if (userId === currentUserId) return;
+        // Measure Latency
+        if ((data as any).timestamp) {
+          const now = Date.now();
+          const transmissionLatency = now - (data as any).timestamp;
+          if (transmissionLatency > 500 || Math.random() < 0.1) {
+            console.log(`[Latency] End-to-End: ${transmissionLatency}ms (${userId})`);
+          }
+        }
 
         const sourceBuffer = sourceBuffersRef.current[socketId];
         const mediaSource = mediaSourcesRef.current[socketId];
@@ -650,7 +656,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           // console.log(`[MediaRecorder] ondataavailable triggered, data size: ${event.data?.size || 0}`);
           if (event.data && event.data.size > 0 && socketRef.current) {
             // console.log(`[MediaRecorder] Emitting media-chunk, size: ${event.data.size}, mimeType: ${mimeType}`);
-            socketRef.current.emit('media-chunk', { chunk: event.data, mimeType });
+            socketRef.current.emit('media-chunk', {
+              chunk: event.data,
+              mimeType,
+              timestamp: Date.now() // Add timestamp for latency measurement
+            });
           } else {
             console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
           }
@@ -1209,6 +1219,34 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
     };
   }, [resetControlsTimer]);
+
+  // Latency Optimization: Catch up if buffer gets too large (TCP Re-transmits)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      Object.entries(remoteVideoRefs.current).forEach(([userId, videoEl]) => {
+        if (!videoEl || videoEl.paused || !videoEl.buffered.length) return;
+
+        // Calculate latency: Difference between what we have buffered and what we are playing
+        const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+        const latency = bufferedEnd - videoEl.currentTime;
+
+        // Threshold: 0.5s (Safe goal)
+        if (latency > 0.5) {
+          if (videoEl.playbackRate !== 1.1) {
+            console.log(`[Latency] High latency (${latency.toFixed(3)}s) for ${userId}. Speeding up (1.1x).`);
+            videoEl.playbackRate = 1.1;
+          }
+        } else if (latency < 0.2) {
+          if (videoEl.playbackRate !== 1.0) {
+            console.log(`[Latency] Normal latency (${latency.toFixed(3)}s) for ${userId}. Normal speed (1.0x).`);
+            videoEl.playbackRate = 1.0;
+          }
+        }
+      });
+    }, 1000); // Check every second
+
+    return () => clearInterval(interval);
+  }, []);
 
 
 
