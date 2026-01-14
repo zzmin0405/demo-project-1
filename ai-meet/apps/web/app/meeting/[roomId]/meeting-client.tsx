@@ -249,9 +249,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
-        console.log('Client: Calling initializeMediaStream from connect event...');
 
-        // Calculate initial settings FIRST
+        // Calculate initial settings
         let initialVideoOn = false;
         let initialMuted = true;
 
@@ -272,10 +271,36 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           isMuted: initialMuted     // Correct initial state
         });
 
-        initializeMediaStream(initialVideoOn, initialMuted, true)
-          .then(() => console.log('Client: initializeMediaStream completed successfully.'))
-          .catch(err => console.error('Client: initializeMediaStream failed:', err));
+        // RECONNECTION HANDLING:
+        // If we already have an active stream, DO NOT re-initialize it. 
+        // Re-initialization stops tracks and kills the camera, causing black screens on mobile flakiness.
+        if (localStreamRef.current && localStreamRef.current.active) {
+          console.log('Client: Stream already active on reconnect. Resuming MediaRecorder...');
 
+          // Re-construct mixed stream for recorder (Video + Processed Audio)
+          const tracks: MediaStreamTrack[] = [];
+          const videoTrack = localStreamRef.current.getVideoTracks()[0];
+          if (videoTrack) tracks.push(videoTrack);
+
+          const processedAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
+          const rawAudioTrack = localStreamRef.current.getAudioTracks()[0];
+
+          if (processedAudioTrack) {
+            tracks.push(processedAudioTrack);
+          } else if (rawAudioTrack) {
+            tracks.push(rawAudioTrack);
+          }
+
+          if (tracks.length > 0) {
+            const mixedStream = new MediaStream(tracks);
+            setupMediaRecorder(mixedStream);
+          }
+        } else {
+          console.log('Client: Initial connection or stream lost. Initializing media...');
+          initializeMediaStream(initialVideoOn, initialMuted, true)
+            .then(() => console.log('Client: initializeMediaStream completed successfully.'))
+            .catch(err => console.error('Client: initializeMediaStream failed:', err));
+        }
       });
 
       socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string }) => {

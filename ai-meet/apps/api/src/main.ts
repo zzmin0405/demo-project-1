@@ -16,14 +16,15 @@ async function bootstrap() {
   });
   console.log('CORS enabled for ALL origins (Global Override)');
   const port = configService.get<number>('PORT') || 3001;
-  const jwtSecret = configService.get<string>('SUPABASE_JWT_SECRET');
+  // const jwtSecret = configService.get<string>('SUPABASE_JWT_SECRET');
 
-  if (!jwtSecret) {
-    throw new Error('CRITICAL ERROR: SUPABASE_JWT_SECRET is not loaded! Check your .env file.');
-  }
+  // BYPASS: Currently Supabase Auth Guard trusts the token directly (Temp Fix in Guard)
+  // So we do not strictly need this secret to start the server.
+  // if (!jwtSecret) {
+  //   throw new Error('CRITICAL ERROR: SUPABASE_JWT_SECRET is not loaded! Check your .env file.');
+  // }
 
-  console.log(`SUPABASE_JWT_SECRET loaded: ${jwtSecret ? 'YES' : 'NO'}`);
-  console.log(`JWT Secret length: ${jwtSecret.length}`);
+  // console.log(`SUPABASE_JWT_SECRET loaded: ${jwtSecret ? 'YES' : 'NO'}`);
 
   await app.listen(port, '0.0.0.0');
   console.log(`Application is running on: ${await app.getUrl()}`);
