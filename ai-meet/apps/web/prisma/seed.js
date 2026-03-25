@@ -1,19 +1,12 @@
-
-import { PrismaClient } from '@prisma/client';
+const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
 async function main() {
-    console.log('Start seeding for Graduation requirements...');
+    console.log('Start seeding for Graduation requirements (JS)...');
 
-    // 1. Clean existing data (Optional, but recommended for clean seed)
-    // await prisma.chatLog.deleteMany({});
-    // await prisma.participant.deleteMany({});
-    // await prisma.meetingRoom.deleteMany({});
-    // await prisma.user.deleteMany({});
-
-    // 2. Generate 100 Users
-    console.log('Seeding 100 users...');
+    // 1. Generate 110 Users
+    console.log('Seeding 110 users...');
     const usersData = [];
     for (let i = 1; i <= 110; i++) {
         usersData.push({
@@ -21,8 +14,6 @@ async function main() {
             email: `user${i}@example.com`,
         });
     }
-    // Using create instead of createMany because standard Prisma doesn't always support createMany on all DBs 
-    // without specific setup, but PostgreSQL supports it.
     await prisma.user.createMany({
         data: usersData,
         skipDuplicates: true,
@@ -31,7 +22,7 @@ async function main() {
     const allUsers = await prisma.user.findMany({ take: 110 });
     const creator = allUsers[0];
 
-    // 3. Generate 110 MeetingRooms
+    // 2. Generate 110 MeetingRooms
     console.log('Seeding 110 meeting rooms...');
     const roomsData = [];
     for (let i = 1; i <= 110; i++) {
@@ -45,7 +36,7 @@ async function main() {
 
     const allRooms = await prisma.meetingRoom.findMany({ take: 110 });
 
-    // 4. Generate 200+ Participants
+    // 3. Generate 200+ Participants
     console.log('Seeding 200 participants...');
     const participantsData = [];
     for (let i = 0; i < 200; i++) {
@@ -62,7 +53,7 @@ async function main() {
         skipDuplicates: true
     });
 
-    // 5. Generate 500+ ChatLogs
+    // 4. Generate 500+ ChatLogs
     console.log('Seeding 500 chat logs...');
     const chatData = [];
     const messages = [
@@ -85,10 +76,6 @@ async function main() {
     await prisma.chatLog.createMany({ data: chatData });
 
     console.log('Seeding finished successfully.');
-    console.log('- Users: 100+');
-    console.log('- MeetingRooms: 100+');
-    console.log('- Participants: 100+');
-    console.log('- ChatLogs: 100+');
 }
 
 main()

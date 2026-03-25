@@ -4,7 +4,9 @@ import type { NextRequest } from "next/server";
 
 export async function middleware(req: NextRequest) {
   const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET });
-  const { pathname } = req.nextUrl;
+  const { pathname, searchParams } = req.nextUrl;
+
+
 
   // If user is logged in and tries to access /login, redirect to home
   if (pathname === '/login') {

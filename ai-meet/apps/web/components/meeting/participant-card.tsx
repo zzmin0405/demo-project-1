@@ -126,24 +126,24 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
             </div>
 
             {/* Hover Controls Overlay */}
-            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 backdrop-blur-[1px]">
+            <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
                 {!isLocal && (
                     <>
                         <Button
                             size="icon"
                             variant={isPinned ? "default" : "secondary"}
-                            className="rounded-full w-10 h-10"
+                            className="rounded-full w-8 h-8 bg-black/60 hover:bg-black/80 text-white border-0 backdrop-blur-sm shadow-md"
                             onClick={() => onPin?.(participant.userId)}
                             title={isPinned ? "Unpin" : "Pin"}
                         >
-                            {isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
+                            {isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
                         </Button>
                         {/* Host controls placeholders */}
-                        <Button size="icon" variant="destructive" className="rounded-full w-10 h-10" title="Mute (Host only)">
-                            <MicOff className="w-4 h-4" />
+                        <Button size="icon" variant="secondary" className="rounded-full w-8 h-8 bg-black/60 hover:bg-black/80 text-white border-0 backdrop-blur-sm shadow-md" title="Mute (Host only)">
+                            <MicOff className="w-3.5 h-3.5" />
                         </Button>
-                        <Button size="icon" variant="destructive" className="rounded-full w-10 h-10" title="Kick (Host only)">
-                            <PhoneOff className="w-4 h-4" />
+                        <Button size="icon" variant="destructive" className="rounded-full w-8 h-8 shadow-md" title="Kick (Host only)">
+                            <PhoneOff className="w-3.5 h-3.5 text-white" />
                         </Button>
                     </>
                 )}

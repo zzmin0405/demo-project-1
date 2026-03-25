@@ -50,7 +50,7 @@ export default function LoginPage() {
           <CardTitle className="text-2xl font-bold">AI-Meet</CardTitle>
           <CardDescription>Sign in to join the meeting</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="flex flex-col gap-2">
           <Button onClick={handleGoogleLogin} className="w-full">
             Sign in with Google
           </Button>

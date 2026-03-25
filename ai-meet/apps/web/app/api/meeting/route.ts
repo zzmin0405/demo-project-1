@@ -14,8 +14,7 @@ export async function POST(req: Request) {
         const body = await req.json();
         const { title, isChatSaved } = body;
 
-        // Find user by email to get ID
-        const user = await prisma.user.findUnique({
+        let user = await prisma.user.findUnique({
             where: { email: session.user.email },
         });
 
