@@ -2,7 +2,8 @@
   "private": true,
   "name": "ai-meet-monorepo",
   "scripts": {
-    "dev": "pnpm --parallel --filter \"./ai-meet/apps/**\" run dev"
+    "dev": "pnpm --parallel --filter \"./ai-meet/apps/**\" run dev",
+    "tunnel": "powershell -ExecutionPolicy Bypass -File ./start-tunnel.ps1"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

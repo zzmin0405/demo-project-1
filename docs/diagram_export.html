@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Architecture Diagram Exporter</title>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ 
+            startOnLoad: true, 
+            theme: 'dark', // Apply dark theme to match the reference image
+            themeVariables: {
+                primaryColor: '#2d2d2d',
+                primaryTextColor: '#eeeeee',
+                primaryBorderColor: '#555555',
+                lineColor: '#888888',
+                secondaryColor: '#1e1e1e',
+                tertiaryColor: '#111111'
+            },
+            flowchart: { htmlLabels: false, curve: 'basis' } 
+        });
+    </script>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            display: flex; 
+            justify-content: center; 
+            padding: 40px; 
+            background-color: #121212; /* Dark background */
+            color: #eeeeee;
+            min-width: 1200px; 
+        }
+        .card { 
+            background: #1e1e1e; 
+            padding: 30px; 
+            border-radius: 12px; 
+            border: 1px solid #333;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5); 
+            text-align: center; 
+        }
+        h2 { color: #ffffff; margin-top: 0; }
+        #download-btn { 
+            margin-top: 25px; 
+            padding: 12px 24px; 
+            background-color: #3b82f6; 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-size: 16px; 
+            font-weight: bold; 
+            transition: background-color 0.2s; 
+        }
+        #download-btn:hover { background-color: #2563eb; }
+        .mermaid { margin-top: 20px; text-align: left; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>AI-Meet 시스템 다이어그램 (Dark Mode)</h2>
+        <p style="color: #9ca3af; margin-bottom: 20px;">Supabase를 제외하고 첨부해주신 흐름도를 바탕으로 재구성했습니다.<br/>하단의 버튼을 눌러 고해상도 PNG로 저장하세요.</p>
+        
+        <div class="mermaid" id="diagram">
+flowchart TD
+    %% Node Default Styles
+    classDef default fill:#2d2d2d,stroke:#666,stroke-width:1px,color:#eee,rx:6,ry:6
+
+    subgraph AI ["AI Pipeline - Python (인공지능 처리)"]
+        direction LR
+        STT["Whisper STT\n(음성 인식 변환)"] --> LLM["Ollama LLM\n(거대 언어 모델)"]
+    end
+    
+    subgraph Frontend ["Frontend - Next.js 15 (사용자 화면)"]
+        direction TB
+        Auth["NextAuth.js\n(OAuth 사용자 인증)"]
+        React["React 19 + TypeScript\n(UI 렌더링 코어)"]
+        Tailwind["Tailwind CSS 4\n+ shadcn/ui\n(화면 스타일링)"]
+        SocketC["Socket.IO Client\n(실시간 소켓 클라이언트)"]
+        
+        Auth -- "인증 세션" --> React
+        React --> SocketC
+        Tailwind -.-> React
+    end
+    
+    subgraph Backend ["Backend - NestJS 11 (서버 기술)"]
+        direction LR
+        Gateway["Express +\nWebSocket Gateway\n(소켓 중계 API 서버)"]
+        JWT["JWT Auth\n(토큰 보안 검증)"]
+        PrismaC["Prisma Client\n(ORM 데이터 제어)"]
+    end
+    
+    subgraph Database ["Database (데이터 저장소)"]
+        PostgreSQL[("PostgreSQL\n(관계형 시스템 DB)")]
+    end
+    
+    %% Connections
+    SocketC <== "WebSocket\n(실시간 양방향)" ==> Gateway
+    Auth == "Prisma Adapter API" ==> PostgreSQL
+    PrismaC ==> PostgreSQL
+
+    %% Positioning Hint (Hidden links to structure layout)
+    AI ~~~ Frontend
+        </div>
+        
+        <button id="download-btn">이미지 다운로드 (.PNG 저장)</button>
+    </div>
+    
+    <script>
+        document.getElementById('download-btn').addEventListener('click', () => {
+             const svg = document.querySelector('.mermaid svg');
+             if(!svg) { 
+                 alert('다이어그램이 아직 렌더링 중입니다. 1~2초 후 다시 시도해주세요.'); 
+                 return; 
+             }
+             
+             const viewBox = svg.viewBox.baseVal;
+             let width = viewBox.width || svg.getBoundingClientRect().width;
+             let height = viewBox.height || svg.getBoundingClientRect().height;
+             
+             const canvas = document.createElement("canvas");
+             const scale = 3; 
+             canvas.width = width * scale;
+             canvas.height = height * scale;
+             
+             const ctx = canvas.getContext("2d");
+             // Black background for dark mode image
+             ctx.fillStyle = "#1e1e1e";
+             ctx.fillRect(0, 0, canvas.width, canvas.height);
+             
+             const serializer = new XMLSerializer();
+             const svgStr = serializer.serializeToString(svg);
+             const b64 = btoa(unescape(encodeURIComponent(svgStr)));
+             
+             const img = new Image();
+             img.src = "data:image/svg+xml;base64," + b64;
+             img.onload = function() {
+                 ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                 const a = document.createElement("a");
+                 a.download = "ai-meet-architecture-dark.png";
+                 a.href = canvas.toDataURL("image/png");
+                 document.body.appendChild(a);
+                 a.click();
+                 document.body.removeChild(a);
+             };
+        });
+    </script>
+</body>
+</html>

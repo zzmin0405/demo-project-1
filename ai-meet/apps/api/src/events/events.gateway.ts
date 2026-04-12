@@ -89,19 +89,57 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
-    const room = this.roomToUsers.get(data.roomId);
+    let room = this.roomToUsers.get(data.roomId);
     if (!room) {
-      const availableRooms = Array.from(this.roomToUsers.keys()).join(', ');
-      console.error(`[ChatDebug] Room ${data.roomId} not found. Available rooms: ${availableRooms}`);
-      client.emit('chat-error', { message: `Room not found. Available: ${availableRooms}` });
-      return;
+      console.log(`[ChatDebug] Room ${data.roomId} not in memory. Checking DB...`);
+      const meetingRoom = await this.prisma.meetingRoom.findUnique({
+        where: { id: data.roomId }
+      });
+
+      if (!meetingRoom) {
+        const availableRooms = Array.from(this.roomToUsers.keys()).join(', ');
+        console.error(`[ChatDebug] Room ${data.roomId} not found in DB. Available: ${availableRooms}`);
+        client.emit('chat-error', { message: `Room not found. Available: ${availableRooms}` });
+        return;
+      }
+
+      // Initialize room in memory
+      room = new Map<string, Participant>();
+      this.roomToUsers.set(data.roomId, room);
+      console.log(`[ChatDebug] Room ${data.roomId} lazy-loaded from DB.`);
     }
 
-    const participant = room.get(client.id);
+    let participant = room.get(client.id);
     if (!participant) {
-      console.error(`[ChatDebug] Participant not found for client ${client.id} in room ${data.roomId}`);
-      client.emit('chat-error', { message: 'Participant not found in room' });
-      return;
+      console.log(`[ChatDebug] Participant not in memory for client ${client.id}. Checking DB...`);
+      const dbParticipant = await this.prisma.participant.findUnique({
+        where: {
+          userId_meetingRoomId: {
+            userId: userId,
+            meetingRoomId: data.roomId
+          }
+        },
+        include: { user: true }
+      });
+
+      if (dbParticipant) {
+        // Auto-rejoin the participant into memory
+        participant = {
+          userId: dbParticipant.userId,
+          username: dbParticipant.user.name || 'Anonymous',
+          avatar_url: dbParticipant.user.image || undefined,
+          hasVideo: !dbParticipant.isVideoOff,
+          isMuted: dbParticipant.isMuted
+        };
+        room.set(client.id, participant);
+        this.userIdToRoom.set(userId, data.roomId);
+        client.join(data.roomId);
+        console.log(`[ChatDebug] Participant ${userId} auto-rejoined into memory.`);
+      } else {
+        console.error(`[ChatDebug] Participant ${userId} not found in DB for room ${data.roomId}`);
+        client.emit('chat-error', { message: 'Participant not found in room. Please refresh.' });
+        return;
+      }
     }
 
     // 1. Save to Database (Async, don't block broadcast)
@@ -228,13 +266,12 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
             // If it's the SAME socket, ignore (re-join)
             if (oldSocketId === client.id) continue;
 
-            console.log(`[Auto-Kick] Found stale socket ${oldSocketId} for user ${userId} in room ${existingRoomId}. Disconnecting.`);
+            console.log(`[Auto-Kick] Found stale socket ${oldSocketId} for user ${userId} in room ${existingRoomId}. Cleaning up silently.`);
 
             const oldSocket = this.server.sockets.sockets.get(oldSocketId);
             if (oldSocket) {
               this.leaveRoom(oldSocket, true); // Silent leave to prevent user-left race condition
-              oldSocket.emit('error', { message: '새로운 접속이 감지되어 연결이 종료되었습니다.' });
-              oldSocket.disconnect(true);
+              oldSocket.disconnect(true); // Disconnect without error - this is normal reconnection behavior
             } else {
               // Manually cleanup if socket object is gone
               existingRoom.delete(oldSocketId);
@@ -380,29 +417,18 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  // WebRTC Signaling Handlers
-  @SubscribeMessage('offer')
-  handleOffer(client: Socket, data: { to: string; offer: any }): void {
-    const fromUserId = client['user'].sub; // Get userId from the authenticated socket
-    client.to(data.to).emit('offer', {
-      from: client.id,
-      fromUserId: fromUserId, // Add this
-      offer: data.offer
-    });
-  }
-
-  @SubscribeMessage('answer')
-  handleAnswer(client: Socket, data: { to: string; answer: any }): void {
-    client.to(data.to).emit('answer', { from: client.id, answer: data.answer });
-  }
-
-  @SubscribeMessage('ice-candidate')
-  handleIceCandidate(client: Socket, data: { to: string; candidate: any }): void {
-    client.to(data.to).emit('ice-candidate', { from: client.id, candidate: data.candidate });
-  }
 
   @SubscribeMessage('camera-state-changed')
   handleCameraStateChanged(client: Socket, data: { roomId: string; userId: string; hasVideo: boolean }): void {
+    // Update server state
+    const room = this.roomToUsers.get(data.roomId);
+    if (room && room.has(client.id)) {
+      const participant = room.get(client.id);
+      if (participant) {
+        participant.hasVideo = data.hasVideo;
+      }
+    }
+
     // Broadcast the camera state change to other users in the room
     client.to(data.roomId).emit('camera-state-changed', {
       userId: data.userId,
@@ -504,6 +530,67 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
           break;
         }
       }
+    }
+  }
+
+  @SubscribeMessage('stt-recognize')
+  async handleSttRecognize(client: Socket, data: { roomId: string; text: string; clientTimestamp?: number }): Promise<void> {
+    const userId = client['user']?.sub;
+    if (!userId || !data.text) return;
+    const { roomId, text, clientTimestamp } = data;
+
+    // Get the speaker's username
+    let userName = 'Unknown';
+    const room = this.roomToUsers.get(data.roomId);
+    if (room && room.has(client.id)) {
+      userName = room.get(client.id)!.username;
+    }
+
+    // Unique ID for this subtitle session (used to track streaming updates)
+    const subtitleId = Math.random().toString(36).substr(2, 9);
+
+    // Immediately show the original text as a "pending" subtitle (instant feedback)
+    this.server.to(data.roomId).emit('subtitle-stream-start', {
+      id: subtitleId,
+      userId,
+      userName,
+      originalText: text,
+      clientTimestamp, // pass through for latency calculation
+    });
+
+    try {
+      // Google Translate API — fast, accurate, no hallucinations
+      const { translate } = await import('google-translate-api-x');
+
+      // Run all 3 translations in parallel for maximum speed (~200ms total)
+      const [enResult, jaResult, zhResult] = await Promise.all([
+        translate(text, { to: 'en' }),
+        translate(text, { to: 'ja' }),
+        translate(text, { to: 'zh-CN' }),
+      ]);
+
+      const translations = {
+        ko: text,
+        en: enResult.text,
+        ja: jaResult.text,
+        zh: zhResult.text,
+      };
+
+      console.log(`[Translate] ✅ "${text}" → EN: "${translations.en}" | JA: "${translations.ja}" | ZH: "${translations.zh}"`);
+
+      this.server.to(roomId).emit('subtitle-broadcast', {
+        id: subtitleId, userId, userName,
+        ...translations,
+        clientTimestamp,
+      });
+
+    } catch (error) {
+      console.error('[Translate] ❌ Google Translate error:', error);
+      this.server.to(roomId).emit('subtitle-broadcast', {
+        id: subtitleId, userId, userName,
+        ko: text, en: text, ja: text, zh: text,
+        clientTimestamp,
+      });
     }
   }
 

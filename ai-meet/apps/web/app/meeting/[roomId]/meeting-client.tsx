@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import {
   Mic, MicOff, Video, VideoOff, MonitorUp, PhoneOff,
   MoreHorizontal, LayoutGrid, Maximize, Pin, PinOff,
-  Users, MessageSquare, Settings, X, Send, ChevronUp, ChevronDown, Edit2, Trash2
+  Users, MessageSquare, Settings, X, Send, ChevronUp, ChevronDown, Edit2, Trash2, Subtitles, Languages
 } from 'lucide-react';
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,20 @@ interface Participant {
 
 type LayoutMode = 'speaker' | 'grid';
 
+export interface SubtitleData {
+  id: string;
+  userId: string;
+  userName: string;
+  ko: string;
+  en: string;
+  ja: string;
+  zh: string;
+  latencyMs?: number;        // ⏱️ End-to-end latency in ms
+  clientTimestamp?: number;  // Unix ms when STT captured the speech
+}
+
+export type SubtitleLang = 'all' | 'ko' | 'en' | 'ja' | 'zh';
+
 export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
   const { data: session, status } = useSession();
@@ -36,7 +50,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoOn, setLocalVideoOn] = useState(false);
+  const localVideoOnRef = useRef(false);
   const [isMuted, setIsMuted] = useState(true);
+  const isMutedRef = useRef(true);
   const [selectedVideoDeviceId, setSelectedVideoDeviceId] = useState<string | null>(null);
   const [availableVideoDevices, setAvailableVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [availableAudioInputDevices, setAvailableAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
@@ -45,6 +61,21 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [selectedAudioOutputDeviceId, setSelectedAudioOutputDeviceId] = useState<string | null>(null);
   const [volume, setVolume] = useState(0.8);
   const [micVolume, setMicVolume] = useState(1.0); // Local Mic Gain (0.0 to 3.0)
+
+  // Subtitles State
+  const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(false);
+  const isSubtitlesEnabledRef = useRef(false);
+  const [subtitleLang, setSubtitleLang] = useState<SubtitleLang>('all'); // language to DISPLAY
+  const [sttLang, setSttLang] = useState(''); // language user SPEAKS (for STT accuracy)
+  const [subtitles, setSubtitles] = useState<SubtitleData[]>([]);
+  const recognitionRef = useRef<any>(null);
+  
+  // Microphone Settings
+  const [noiseSuppression, setNoiseSuppression] = useState(true);
+  const [echoCancellation, setEchoCancellation] = useState(true);
+
+  // Latency stats for Settings panel
+  const [latencyHistory, setLatencyHistory] = useState<number[]>([]);
 
   const [meetingTitle, setMeetingTitle] = useState("Meeting Room");
   const [isHost, setIsHost] = useState(false);
@@ -110,10 +141,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       if (storedSettings) {
         try {
           const settings = JSON.parse(storedSettings);
-          if (settings.joinMuted !== undefined) setIsMuted(settings.joinMuted);
+          if (settings.joinMuted !== undefined) {
+            setIsMuted(settings.joinMuted);
+            isMutedRef.current = settings.joinMuted;
+          }
           // If joinVideoOff is true, localVideoOn should be false.
           // If joinVideoOff is false, localVideoOn should be true.
-          if (settings.joinVideoOff !== undefined) setLocalVideoOn(!settings.joinVideoOff);
+          if (settings.joinVideoOff !== undefined) {
+            setLocalVideoOn(!settings.joinVideoOff);
+            localVideoOnRef.current = !settings.joinVideoOff;
+          }
         } catch (e) {
           console.error("Failed to parse meeting settings", e);
         }
@@ -131,26 +168,126 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, [chatMessages, showChatPanel]);
 
-  // ... (existing useEffects)
-
-  // This socket.on listener needs to be inside an useEffect or a function called from useEffect
-  // For now, I'll assume it's part of the socket initialization logic within useEffect.
-  // If it's meant to be a global listener, it should be handled differently.
-  // For the purpose of this edit, I'm leaving it as is, assuming it's a placeholder.
-  // socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
-  //   setChatMessages(prev => [...prev, data]);
-  // });
-
-  // ... (existing socket listeners)
-
-
-
 
 
   useEffect(() => {
     const savedSetting = localStorage.getItem('exitImmediately') === 'true';
     setExitImmediately(savedSetting);
   }, []);
+
+  // --- Subtitles STT Setup ---
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+         const recognition = new SpeechRecognition();
+         recognition.continuous = true;
+         recognition.interimResults = true; // Show interim results so user sees it's working
+         recognition.lang = sttLang; // Empty = auto-detect browser language, or explicitly set (ko-KR, en-US, etc)
+         recognition.maxAlternatives = 1;
+
+         let restartTimeoutRef: ReturnType<typeof setTimeout> | null = null;
+         let interimFlushTimer: ReturnType<typeof setTimeout> | null = null;
+         let lastInterimText = '';
+         let lastSentText = ''; // Prevent duplicate sends
+
+         recognition.onresult = (event: any) => {
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              const transcript = event.results[i][0].transcript.trim();
+
+              if (event.results[i].isFinal) {
+                // ✅ Final result arrived — send immediately and cancel any pending interim flush
+                if (interimFlushTimer) { clearTimeout(interimFlushTimer); interimFlushTimer = null; }
+                if (transcript && transcript !== lastSentText && socketRef.current) {
+                    console.log("[STT] Final:", transcript);
+                    lastSentText = transcript;
+                    socketRef.current.emit('stt-recognize', {
+                      roomId,
+                      text: transcript,
+                      clientTimestamp: Date.now(),
+                    });
+                }
+                lastInterimText = '';
+              } else {
+                // ⏱️ Interim result — if text stays stable for 1s, force-send it
+                lastInterimText = transcript;
+                if (interimFlushTimer) clearTimeout(interimFlushTimer);
+                interimFlushTimer = setTimeout(() => {
+                  if (lastInterimText && lastInterimText !== lastSentText && socketRef.current) {
+                    console.log("[STT] Interim flush (1s stable):", lastInterimText);
+                    lastSentText = lastInterimText;
+                    socketRef.current.emit('stt-recognize', {
+                      roomId,
+                      text: lastInterimText,
+                      clientTimestamp: Date.now(),
+                    });
+                  }
+                  lastInterimText = '';
+                }, 1000); // 1초 동안 변화 없으면 강제 전송
+              }
+            }
+         };
+
+         recognition.onerror = (event: any) => {
+            if (event.error === 'no-speech') return; // Normal silence, ignore
+
+            console.warn("[STT] Error:", event.error);
+
+            // For network/aborted errors, schedule a restart
+            if (['network', 'aborted', 'service-not-allowed'].includes(event.error)) {
+              if (restartTimeoutRef) clearTimeout(restartTimeoutRef);
+              restartTimeoutRef = setTimeout(() => {
+                if (isSubtitlesEnabledRef.current) {
+                  try { recognition.start(); } catch (e) {}
+                }
+              }, 500);
+            }
+         };
+
+         recognition.onend = () => {
+             // KEY FIX: Delay restart by 300ms to avoid race condition where browser
+             // is still "stopping" and rejects the immediate start() call silently
+             if (isSubtitlesEnabledRef.current) {
+               if (restartTimeoutRef) clearTimeout(restartTimeoutRef);
+               restartTimeoutRef = setTimeout(() => {
+                 if (isSubtitlesEnabledRef.current) {
+                   try { recognition.start(); } catch (e) {}
+                 }
+               }, 300);
+             }
+         };
+
+         recognitionRef.current = recognition;
+      } else {
+         console.warn("[STT] Speech Recognition API not supported in this browser.");
+      }
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+  }, [roomId]);
+
+  useEffect(() => {
+    isSubtitlesEnabledRef.current = isSubtitlesEnabled;
+    if (isSubtitlesEnabled && !isMuted && recognitionRef.current) {
+      try { recognitionRef.current.start(); console.log("[STT] Started (CC on + mic on)"); } catch (e) {}
+    } else if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); console.log("[STT] Stopped"); } catch (e) {}
+    }
+  }, [isSubtitlesEnabled]);
+
+  // STT follows mic mute state: muted → stop STT, unmuted → start STT (if CC is on)
+  useEffect(() => {
+    if (!recognitionRef.current) return;
+    if (isSubtitlesEnabled && !isMuted) {
+      try { recognitionRef.current.start(); console.log("[STT] Resumed (mic unmuted)"); } catch (e) {}
+    } else if (isMuted) {
+      try { recognitionRef.current.stop(); console.log("[STT] Paused (mic muted)"); } catch (e) {}
+    }
+  }, [isMuted, isSubtitlesEnabled]);
 
   // Dynamic Device Detection
   useEffect(() => {
@@ -335,7 +472,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
 
         // Restart MediaRecorder to send a fresh Init Segment (Keyframe) to the new user
-        if (localStreamRef.current && localVideoOn) {
+        // Use ref to get the latest value (state may be stale in this closure)
+        if (localStreamRef.current && localVideoOnRef.current) {
           console.log(`[UserJoined] Restarting MediaRecorder to send fresh Init Segment to ${data.username}`);
           setupMediaRecorder(localStreamRef.current);
         }
@@ -400,25 +538,40 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           if (!chunkQueueRef.current[socketId]) {
             chunkQueueRef.current[socketId] = [];
           }
+          // Limit queue size to prevent memory overflow on slow connections
+          if (chunkQueueRef.current[socketId].length > 30) {
+            chunkQueueRef.current[socketId].shift(); // Drop oldest chunk
+          }
           chunkQueueRef.current[socketId].push(blob);
           return;
         }
 
+        // 항상 큐(Queue)에 먼저 넣어 클러스터 순서(Timestamp)가 꼬이지 않도록 엄격하게 유지
+        if (!chunkQueueRef.current[socketId]) {
+          chunkQueueRef.current[socketId] = [];
+        }
+        // Limit queue size to prevent memory overflow
+        if (chunkQueueRef.current[socketId].length > 30) {
+          chunkQueueRef.current[socketId].shift(); // Drop oldest chunk
+        }
+        chunkQueueRef.current[socketId].push(blob);
+
+        // 버퍼가 비어있고, 넣을 데이터가 큐에 존재하면 즉시 큐를 재가동(Jumpstart)
         if (!sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
-          try {
-            sourceBuffer.appendBuffer(await blob.arrayBuffer());
-          } catch (e) {
-            if (e instanceof DOMException && e.name === 'InvalidStateError') {
-              console.warn(`Ignored InvalidStateError for ${socketId} (likely cleanup race condition)`);
-            } else {
-              console.error(`Error appending buffer for ${socketId}`, e);
+          const nextChunk = chunkQueueRef.current[socketId][0]; // Peek
+          if (nextChunk) {
+            try {
+              sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+              chunkQueueRef.current[socketId].shift(); // 정상적으로 들어갔을 때만 큐에서 제거
+            } catch (e) {
+              if (e instanceof DOMException && e.name === 'InvalidStateError') {
+                console.warn(`Ignored InvalidStateError for ${socketId} (likely cleanup race condition)`);
+              } else {
+                console.error(`Error appending buffer for ${socketId}`, e);
+                chunkQueueRef.current[socketId].shift(); // 치명적 에러 시 데드락 방지를 위해 버림
+              }
             }
           }
-        } else {
-          if (!chunkQueueRef.current[socketId]) {
-            chunkQueueRef.current[socketId] = [];
-          }
-          chunkQueueRef.current[socketId].push(blob);
         }
       });
 
@@ -473,6 +626,86 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       });
 
+      // STREAMING SUBTITLE HANDLERS (3-step pipeline)
+
+      // Step 1: Original text arrives instantly → show placeholder immediately
+      socket.on('subtitle-stream-start', (data: { id: string; userId: string; userName: string; originalText: string; clientTimestamp?: number }) => {
+        const placeholder: SubtitleData = {
+          id: data.id,
+          userId: data.userId,
+          userName: data.userName,
+          ko: data.originalText,
+          en: '...',
+          ja: '...',
+          zh: '...',
+          latencyMs: undefined, // Not yet known
+          clientTimestamp: data.clientTimestamp,
+        };
+        setSubtitles(prev => {
+          const newSubtitles = [...prev, placeholder];
+          return newSubtitles.length > 5 ? newSubtitles.slice(-5) : newSubtitles;
+        });
+
+        // 🛡️ Safety net: If backend fails and 'subtitle-broadcast' never arrives, remove the stuck subtitle after 8 seconds
+        setTimeout(() => {
+          setSubtitles(prev => prev.filter(s => s.id !== data.id));
+        }, 8000);
+      });
+
+      // Step 2: Raw streaming tokens arrive (for visual typing feedback - optional)
+      // We intentionally skip re-rendering partial JSON to avoid flickering
+      // subtitle-stream-chunk is received but we wait for the final broadcast
+
+      // Step 3: Final parsed translations arrive → replace placeholder in-place
+      socket.on('subtitle-broadcast', (data: SubtitleData) => {
+        // ⏱️ Calculate total end-to-end latency
+        const latencyMs = data.clientTimestamp ? Date.now() - data.clientTimestamp : undefined;
+        if (latencyMs) {
+          console.log(`[Subtitle Latency] ${latencyMs}ms`);
+          // Keep last 20 measurements for rolling average
+          setLatencyHistory(prev => [...prev.slice(-19), latencyMs]);
+        }
+
+        setSubtitles(prev =>
+          // Replace the matching placeholder with final translated version
+          prev.map(s => s.id === data.id ? { ...data, latencyMs } : s)
+        );
+        // Auto-remove after 6 seconds
+        setTimeout(() => {
+          setSubtitles(prev => prev.filter(s => s.id !== data.id));
+        }, 6000);
+      });
+
+      socket.on('stream-reset', ({ userId }: { userId: string }) => {
+        const socketId = userIdToSocketIdMap.current[userId];
+        if (socketId) {
+          console.log(`[StreamReset] Received stream reset for ${userId}, cleaning up MediaSource...`);
+          cleanupMediaSource(socketId);
+        }
+      });
+
+      socket.on('request-keyframe', ({ fromUserId }: { fromUserId: string }) => {
+        console.log(`[Keyframe] Received request for keyframe from ${fromUserId}, restarting MediaRecorder...`);
+        if (localStreamRef.current && localVideoOnRef.current) {
+          setupMediaRecorder(localStreamRef.current);
+        } else if (isScreenSharing && screenStreamRef.current) {
+          // If we are screen sharing, restart that stream instead
+          // Need to reconstruct the mixed stream
+          const tracks: MediaStreamTrack[] = [];
+          const screenVideoTrack = screenStreamRef.current.getVideoTracks()[0];
+          if (screenVideoTrack) tracks.push(screenVideoTrack);
+          const screenAudioTrack = screenStreamRef.current.getAudioTracks()[0];
+          const micAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
+          if (screenAudioTrack) {
+            tracks.push(screenAudioTrack);
+          } else if (micAudioTrack) {
+            tracks.push(micAudioTrack);
+          }
+          const mixedStream = new MediaStream(tracks);
+          setupMediaRecorder(mixedStream);
+        }
+      });
+
       socket.on('chat-error', (data: { message: string }) => {
         console.error('[ChatDebug] Chat error received:', data.message);
         if (data.message.includes('Room not found') || data.message.includes('Participant not found')) {
@@ -481,8 +714,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             roomId,
             username: session?.user?.name || session?.user?.email || 'Anonymous',
             avatar_url: session?.user?.image || undefined,
-            hasVideo: localVideoOn,
-            isMuted: isMuted
+            hasVideo: localVideoOnRef.current,
+            isMuted: isMutedRef.current
           });
           // Optional: Retry sending the message after a short delay?
           // For now, just let the user retry or rely on the next message.
@@ -504,22 +737,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         router.push('/');
       });
 
-      socket.on('stream-reset', ({ userId }: { userId: string }) => {
-        console.log(`[Client] Received stream-reset for ${userId}`);
-        const socketId = userIdToSocketIdMap.current[userId];
-        if (socketId) {
-          cleanupMediaSource(socketId);
-        }
-      });
-
-      socket.on('request-keyframe', () => {
-        console.log('[Client] Received request-keyframe. Restarting MediaRecorder...');
-        if (localStreamRef.current) {
-          // Notify others to reset their buffers because we are restarting the stream
-          socketRef.current?.emit('stream-reset', { roomId, userId: currentUserId });
-          setupMediaRecorder(localStreamRef.current);
-        }
-      });
 
       console.log('Client: Calling socket.connect()...');
       socket.connect();
@@ -605,29 +822,28 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, [micVolume, isMuted]);
 
-  // Use callback ref to set initial ref
   const setLocalVideoRef = useCallback((element: HTMLVideoElement | null) => {
-    console.log('[setLocalVideoRef] Called with element:', !!element, 'localStream:', !!localStream);
     localVideoRef.current = element;
-    if (element && localStream) {
-      console.log('[Callback Ref] Setting srcObject...');
-      element.srcObject = localStream;
-      console.log('[Callback Ref] srcObject set successfully');
+    if (element) {
+      if (isScreenSharing && screenStreamRef.current) {
+        element.srcObject = screenStreamRef.current;
+      } else if (localStream) {
+        element.srcObject = localStream;
+      }
     }
-  }, [localStream]);
+  }, [localStream, isScreenSharing]);
 
-  // Also use useEffect to update when localStream changes
+  // Also use useEffect to update when localStream or isScreenSharing changes
   useEffect(() => {
-    console.log('[useEffect srcObject] Triggered. localStream:', !!localStream, 'localVideoRef.current:', !!localVideoRef.current, 'localVideoOn:', localVideoOn);
-    if (localStream && localVideoRef.current) {
-      console.log('[useEffect srcObject] Setting srcObject...');
-      localVideoRef.current.srcObject = localStream;
+    if (localVideoRef.current) {
+      if (isScreenSharing && screenStreamRef.current) {
+        localVideoRef.current.srcObject = screenStreamRef.current;
+      } else if (localStream) {
+        localVideoRef.current.srcObject = localStream;
+      }
       localVideoRef.current.muted = true;
-      console.log('[useEffect srcObject] srcObject set successfully');
-    } else {
-      console.log('[useEffect srcObject] Skipping. Missing stream or ref.');
     }
-  }, [localStream, localVideoOn]);
+  }, [localStream, localVideoOn, isScreenSharing]);
 
   const setupMediaRecorder = (stream: MediaStream) => {
     if (mediaRecorderRef.current) {
@@ -677,8 +893,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           }
         };
         mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(100); // 100ms for smoother video
-        console.log('Client: MediaRecorder started with 100ms intervals');
+        mediaRecorder.start(500); // 500ms 딜레이로 변경하여 과도한 패킷 분할(Fragmentation) 오버헤드 방지
+        console.log('Client: MediaRecorder started with 500ms intervals');
       } catch (e) {
         console.error('MediaRecorder setup failed:', e);
       }
@@ -708,58 +924,105 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           console.error(`${mimeType} is not supported`);
           return;
         }
+
+        // 방어 로직: sourceopen 이벤트가 트리거되는 그 짧은 사이에 
+        // 유저가 방을 나가거나 스트림을 초기화하여 mediaSource가 닫힌(closed) 상태일 수 있음
+        if (mediaSource.readyState !== 'open') {
+          console.warn(`[MediaSource] Aborting addSourceBuffer for ${socketId} because readyState is ${mediaSource.readyState}`);
+          return;
+        }
+
+        // 방어 로직 2: React 리렌더링 등으로 인해 sourceopen이 재차 발생했을 때 버퍼 중복 추가 방지
+        if (mediaSource.sourceBuffers.length > 0) {
+          console.warn(`[MediaSource] SourceBuffer already exists for ${socketId}, skipping duplicate addition.`);
+          return;
+        }
+
         const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
         sourceBuffersRef.current[socketId] = sourceBuffer;
 
         sourceBuffer.addEventListener('updateend', async () => {
-          // Prune old buffer data to prevent memory overflow
-          if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
-            const userId = socketIdToUserIdMap.current[socketId];
-            const videoElement = userId ? remoteVideoRefs.current[userId] : null;
-            const currentTime = videoElement?.currentTime || 0;
-            const bufferStart = sourceBuffer.buffered.start(0);
-            const bufferEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+          // Safety check: Ensure the buffer is still active and the MediaSource is open
+          if (!sourceBuffersRef.current[socketId] || mediaSource.readyState !== 'open') return;
 
-            // Keep only last 20 seconds of buffer (reduced from 30 to prevent QuotaExceeded)
-            if (currentTime - bufferStart > 20) {
-              try {
-                const removeEnd = Math.max(bufferStart, currentTime - 20);
-                sourceBuffer.remove(bufferStart, removeEnd);
-                console.log(`[Buffer] Pruned old data for ${socketId}: ${bufferStart.toFixed(2)}s to ${removeEnd.toFixed(2)}s`);
-                return; // Wait for next updateend to process queue
-              } catch (e) {
-                console.warn(`[Buffer] Failed to prune for ${socketId}`, e);
+          const userId = socketIdToUserIdMap.current[socketId];
+          const videoElement = userId ? remoteVideoRefs.current[userId] : null;
+          const currentTime = videoElement?.currentTime || 0;
+
+          try {
+            // Prune old buffer data to prevent memory overflow
+            if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
+              const bufferStart = sourceBuffer.buffered.start(0);
+              const bufferEnd = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+              const bufferDuration = bufferEnd - bufferStart;
+
+              // Periodic status log (every ~5 seconds approx based on update frequency)
+              if (Math.random() < 0.1) {
+                console.log(`[Buffer Status] Socket: ${socketId}, Total Buffer: ${bufferDuration.toFixed(2)}s, Current: ${currentTime.toFixed(2)}s`);
+              }
+
+              // Keep only last 20 seconds of buffer 
+              if (currentTime - bufferStart > 20) {
+                try {
+                  const removeEnd = Math.max(bufferStart, currentTime - 20);
+                  sourceBuffer.remove(bufferStart, removeEnd);
+                  console.log(`[Buffer] Pruning old data for ${socketId}: ${bufferStart.toFixed(2)}s to ${removeEnd.toFixed(2)}s (Saving Memory)`);
+                  return; // Wait for next updateend to process queue
+                } catch (e) {
+                  console.warn(`[Buffer] Failed to prune for ${socketId}`, e);
+                }
               }
             }
+          } catch (e) {
+            console.warn(`[Buffer] SourceBuffer error during updateend for ${socketId}`, e);
           }
 
-          // Latency Management (Catch-up Logic)
+          // Latency Management (Smooth Catch-up Logic)
+          // Instead of jumping (which causes visible freezes), gradually speed up
+          // playback to smoothly close the gap with the live edge.
           if (videoElement && !videoElement.paused) {
-            const buffered = sourceBuffer.buffered;
-            if (buffered.length > 0) {
-              const end = buffered.end(buffered.length - 1);
-              const currentTime = videoElement.currentTime;
-              const latency = end - currentTime;
+            try {
+              const buffered = sourceBuffer.buffered;
+              if (buffered.length > 0) {
+                const end = buffered.end(buffered.length - 1);
+                const latency = end - currentTime;
 
-              // 1. Gap Jumping (For large lags > 3s)
-              if (latency > 3) {
-                console.log(`[Latency] Jumping to live edge (Lag: ${latency.toFixed(2)}s)`);
-                videoElement.currentTime = end - 0.1;
-              }
-              // 2. Playback Rate Adjustment (For small lags 0.5s - 3s)
-              else if (latency > 0.5) {
-                if (videoElement.playbackRate !== 1.1) {
-                  console.log(`[Latency] Speeding up playback (Lag: ${latency.toFixed(2)}s)`);
-                  videoElement.playbackRate = 1.1;
-                }
-              }
-              // 3. Normal Playback
-              else {
-                if (videoElement.playbackRate !== 1.0) {
-                  console.log(`[Latency] Normal speed (Lag: ${latency.toFixed(2)}s)`);
+                // Emergency jump (only for extreme lag > 5s, e.g. tab was backgrounded)
+                if (latency > 5) {
+                  console.log(`[Latency] Emergency jump to live edge (Lag: ${latency.toFixed(2)}s)`);
+                  videoElement.currentTime = end - 0.3;
                   videoElement.playbackRate = 1.0;
                 }
+                // Tier 3: Fast catch-up (1.5s ~ 5s lag) → 1.1x speed
+                else if (latency > 1.5) {
+                  if (videoElement.playbackRate !== 1.1) {
+                    console.log(`[Latency] 1.1x speed (Lag: ${latency.toFixed(2)}s)`);
+                    videoElement.playbackRate = 1.1;
+                  }
+                }
+                // Tier 2: Medium catch-up (0.8s ~ 1.5s lag) → 1.05x speed
+                else if (latency > 0.8) {
+                  if (videoElement.playbackRate !== 1.05) {
+                    console.log(`[Latency] 1.05x speed (Lag: ${latency.toFixed(2)}s)`);
+                    videoElement.playbackRate = 1.05;
+                  }
+                }
+                // Tier 1: Gentle catch-up (0.3s ~ 0.8s lag) → 1.02x speed
+                else if (latency > 0.3) {
+                  if (videoElement.playbackRate !== 1.02) {
+                    videoElement.playbackRate = 1.02;
+                  }
+                }
+                // Normal: Synced (< 0.3s lag) → 1.0x speed
+                else {
+                  if (videoElement.playbackRate !== 1.0) {
+                    console.log(`[Latency] Synced! (Lag: ${latency.toFixed(2)}s)`);
+                    videoElement.playbackRate = 1.0;
+                  }
+                }
               }
+            } catch (e) {
+              console.warn(`[Latency] Error in catch-up logic for ${socketId}`, e);
             }
           }
 
@@ -774,20 +1037,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               } catch (e: any) {
                 if (e.name === 'QuotaExceededError') {
                   console.warn(`[Buffer] QuotaExceededError for ${socketId}. Aggressively pruning...`);
-                  if (sourceBuffer.buffered.length > 0) {
-                    const bufferStart = sourceBuffer.buffered.start(0);
-                    const currentTime = videoElement?.currentTime || bufferStart; // Use bufferStart if no video element
-                    // Remove everything up to 5 seconds before current time (or just first 10 seconds of buffer)
-                    const removeEnd = Math.max(bufferStart + 5, currentTime - 5);
-
-                    if (!sourceBuffer.updating) {
-                      try {
-                        sourceBuffer.remove(bufferStart, removeEnd);
-                        console.log(`[Buffer] Emergency prune: ${bufferStart} to ${removeEnd}`);
-                      } catch (pruneErr) {
-                        console.error(`[Buffer] Emergency prune failed`, pruneErr);
-                      }
+                  try {
+                    if (sourceBuffer.buffered.length > 0 && !sourceBuffer.updating) {
+                      const bufferStart = sourceBuffer.buffered.start(0);
+                      const ct = videoElement?.currentTime || bufferStart;
+                      const removeEnd = Math.max(bufferStart + 5, ct - 5);
+                      sourceBuffer.remove(bufferStart, removeEnd);
+                      console.log(`[Buffer] Emergency prune: ${bufferStart.toFixed(2)} to ${removeEnd.toFixed(2)}`);
                     }
+                  } catch (pruneErr) {
+                    console.warn(`[Buffer] Emergency prune failed`, pruneErr);
                   }
                   // Do NOT shift the chunk, retry later? 
                   // Actually, if we remove, updateend will fire, and we can try again.
@@ -857,20 +1116,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   };
 
 
-
-  // Effect to set up MediaSource for participants when they are added and video elements are ready
-  // REMOVED: Proactive setup is removed to allow socket.on('media-chunk') to determine the correct mimeType.
-  /*
-  useEffect(() => {
-    participants.forEach(p => {
-      const socketId = userIdToSocketIdMap.current[p.userId];
-      if (socketId && !mediaSourcesRef.current[socketId] && remoteVideoRefs.current[p.userId]) {
-        setupMediaSource(p.userId, socketId);
-      }
-    });
-  }, [participants]);
-  */
-
   const initializeMediaStream = async (initialVideoOn: boolean = false, initialMuted: boolean = true, isInitial: boolean = false) => {
     try {
       console.log(`Client: Initializing media stream (Initial video: ${initialVideoOn}, Initial muted: ${initialMuted})...`);
@@ -890,13 +1135,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       const audioConstraint: boolean | MediaTrackConstraints = selectedAudioInputDeviceId
         ? {
           deviceId: { exact: selectedAudioInputDeviceId },
-          echoCancellation: true,
-          noiseSuppression: true,
+          echoCancellation: echoCancellation,
+          noiseSuppression: noiseSuppression,
           autoGainControl: true
         }
         : {
-          echoCancellation: true,
-          noiseSuppression: true,
+          echoCancellation: echoCancellation,
+          noiseSuppression: noiseSuppression,
           autoGainControl: true
         };
 
@@ -1022,7 +1267,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       localStreamRef.current = stream;
       console.log('Client: localStreamRef.current set:', !!localStreamRef.current, 'Tracks:', stream.getTracks().length);
       setLocalVideoOn(initialVideoOn);
+      localVideoOnRef.current = initialVideoOn;
       setIsMuted(initialMuted);
+      isMutedRef.current = initialMuted;
       console.log('Client: Media stream initialized (always-on mode).');
 
       setupMediaRecorder(mixedStream);
@@ -1081,10 +1328,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log(`[toggleCamera] Current enabled: ${videoTrack.enabled}, localVideoOn: ${localVideoOn}`);
     videoTrack.enabled = !videoTrack.enabled;
     setLocalVideoOn(videoTrack.enabled);
+    localVideoOnRef.current = videoTrack.enabled;
     console.log(`[toggleCamera] New enabled: ${videoTrack.enabled}, will set localVideoOn to: ${videoTrack.enabled}`);
 
-    // REMOVED: Do NOT restart MediaRecorder. Keep the stream alive.
-    // videoTrack.enabled = false will send black frames (or no frames) but keep the connection.
+    // When camera is turned back ON, restart MediaRecorder to send fresh init segment
+    // and notify receivers to recreate their MediaSource
+    if (videoTrack.enabled && localStreamRef.current) {
+      console.log('[toggleCamera] Camera ON: Restarting MediaRecorder and sending stream-reset');
+      setupMediaRecorder(localStreamRef.current);
+      socketRef.current?.emit('stream-reset', { roomId, userId: currentUserId });
+    }
 
     socketRef.current?.emit('camera-state-changed', {
       roomId,
@@ -1096,8 +1349,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const toggleScreenShare = async () => {
     if (isScreenSharing) {
-      // Stop screen sharing
-      screenStreamRef.current?.getTracks().forEach(track => track.stop());
+      // Stop screen sharing safely (prevent recursive onended loop)
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach(track => {
+          track.onended = null; // Disable event listener before stopping manually
+          track.stop();
+        });
+      }
       screenStreamRef.current = null;
       setIsScreenSharing(false);
 
@@ -1171,15 +1429,24 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   };
 
   const toggleMute = () => {
-    if (!gainNodeRef.current) {
-      console.warn('GainNode not available. Media stream not initialized.');
-      alert('마이크를 찾을 수 없거나 초기화되지 않았습니다.');
-      return;
-    }
-
     const newMutedState = !isMuted;
     setIsMuted(newMutedState);
-    gainNodeRef.current.gain.value = newMutedState ? 0 : micVolume;
+    isMutedRef.current = newMutedState;
+
+    // 1. Web Audio API (GainNode) 볼륨 조절
+    if (gainNodeRef.current) {
+      // micVolume 변수가 스코프에 없거나 깨졌을 수 있으므로 기본값 1 적용
+      gainNodeRef.current.gain.value = newMutedState ? 0 : 1; 
+    }
+
+    // 2. 하드웨어 마이크 트랙(MediaStreamTrack) 직접 제어 (가장 확실한 방법)
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !newMutedState;
+        console.log(`[toggleMute] Hardware audio track enabled: ${audioTrack.enabled}`);
+      }
+    }
 
     socketRef.current?.emit('mic-state-changed', {
       roomId,
@@ -1307,33 +1574,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     };
   }, [resetControlsTimer]);
 
-  // Latency Optimization: Catch up if buffer gets too large (TCP Re-transmits)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      Object.entries(remoteVideoRefs.current).forEach(([userId, videoEl]) => {
-        if (!videoEl || videoEl.paused || !videoEl.buffered.length) return;
+  // NOTE: Latency management is handled inside the MediaSource updateend handler
+  // with a smooth 4-tier catch-up system (1.02x / 1.05x / 1.1x / emergency jump).
+  // No additional interval-based latency check is needed here.
 
-        // Calculate latency: Difference between what we have buffered and what we are playing
-        const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
-        const latency = bufferedEnd - videoEl.currentTime;
-
-        // Threshold: 0.5s (Safe goal)
-        if (latency > 0.5) {
-          if (videoEl.playbackRate !== 1.1) {
-            console.log(`[Latency] High latency (${latency.toFixed(3)}s) for ${userId}. Speeding up (1.1x).`);
-            videoEl.playbackRate = 1.1;
-          }
-        } else if (latency < 0.2) {
-          if (videoEl.playbackRate !== 1.0) {
-            console.log(`[Latency] Normal latency (${latency.toFixed(3)}s) for ${userId}. Normal speed (1.0x).`);
-            videoEl.playbackRate = 1.0;
-          }
-        }
-      });
-    }, 1000); // Check every second
-
-    return () => clearInterval(interval);
-  }, []);
 
 
 
@@ -1405,8 +1649,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         // Error Recovery Listener
         const errorHandler = (e: Event) => {
-          console.error(`[VideoRef] Video error for ${userId}:`, (e.target as HTMLVideoElement).error);
-          cleanupMediaSource(socketId); // Force cleanup to allow recreation on next chunk
+          const videoError = (e.target as HTMLVideoElement).error;
+          const errorCode = videoError?.code || 0;
+          // Only force cleanup for fatal errors (MEDIA_ERR_DECODE=3, MEDIA_ERR_SRC_NOT_SUPPORTED=4)
+          // Minor errors (MEDIA_ERR_ABORTED=1, MEDIA_ERR_NETWORK=2) can self-recover
+          if (errorCode >= 3) {
+            console.error(`[VideoRef] Fatal video error for ${userId} (code ${errorCode}):`, videoError?.message);
+            cleanupMediaSource(socketId);
+          } else {
+            console.warn(`[VideoRef] Minor video error for ${userId} (code ${errorCode}), auto-recovering...`);
+            // Re-attach the listener for next potential error
+            el.addEventListener('error', errorHandler, { once: true });
+          }
         };
         el.addEventListener('error', errorHandler, { once: true });
 
@@ -1607,6 +1861,39 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           {/* Reaction Overlay */}
           <ReactionOverlay reactions={reactions} />
 
+          {/* Subtitles Overlay (Netflix Style) */}
+          {isSubtitlesEnabled && subtitles.length > 0 && (
+            <div className="absolute bottom-32 left-0 right-0 z-40 flex flex-col items-center justify-end pointer-events-none px-4 gap-2">
+              {subtitles.map((sub) => (
+                <div key={sub.id} className="bg-black/70 backdrop-blur-sm px-4 py-2 rounded-lg max-w-3xl w-full text-center shadow-2xl animate-in slide-in-from-bottom-2 fade-in duration-300">
+                  {/* Speaker name + latency badge */}
+                  <div className="flex items-center justify-center gap-2 mb-1">
+                    <span className="text-xs text-blue-300 font-bold opacity-90">{sub.userName}</span>
+                    {sub.latencyMs && (
+                      <span className="text-[10px] bg-green-500/20 text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded-full font-mono font-bold">
+                        ⚡ {sub.latencyMs}ms
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {(subtitleLang === 'all' || subtitleLang === 'ko') && (
+                      <p className="text-white font-medium text-sm md:text-base leading-snug drop-shadow-md">🇰🇷 {sub.ko}</p>
+                    )}
+                    {(subtitleLang === 'all' || subtitleLang === 'en') && (
+                      <p className="text-yellow-400 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇺🇸 {sub.en}</p>
+                    )}
+                    {(subtitleLang === 'all' || subtitleLang === 'ja') && (
+                      <p className="text-green-300 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇯🇵 {sub.ja}</p>
+                    )}
+                    {(subtitleLang === 'all' || subtitleLang === 'zh') && (
+                      <p className="text-pink-300 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇨🇳 {sub.zh}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Reaction Bar (Floating) */}
           <div className={cn(
             "absolute bottom-24 left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-300",
@@ -1680,6 +1967,79 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 <MonitorUp className="w-5 h-5 md:w-6 md:h-6 mb-1" />
                 <span className="text-[10px] md:text-xs font-medium">{isScreenSharing ? 'Stop Share' : 'Screen Share'}</span>
               </Button>
+
+              <div className="relative group">
+                <Button
+                  variant="ghost"
+                  className={cn(
+                    "flex flex-col items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-xl hover:bg-white/10 text-white transition-all",
+                    isSubtitlesEnabled && "text-yellow-400 bg-white/10"
+                  )}
+                  onClick={() => setIsSubtitlesEnabled(!isSubtitlesEnabled)}
+                >
+                  <Subtitles className="w-5 h-5 md:w-6 md:h-6 mb-1" />
+                  <span className="text-[10px] md:text-xs font-medium">CC</span>
+                </Button>
+                
+                {/* Language Selector Popup (Visible on Hover when CC is active) */}
+                {isSubtitlesEnabled && (
+                  <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-black/90 backdrop-blur-md rounded-lg p-3 flex flex-col gap-3 border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-50 shadow-xl">
+                    {/* View Language */}
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-gray-400 font-bold px-1 mb-0.5">표시할 자막 (Display)</span>
+                      <div className="flex gap-1">
+                        {['all', 'ko', 'en', 'ja', 'zh'].map((lang) => (
+                          <button
+                            key={'view-' + lang}
+                            className={cn(
+                              "text-xs px-2.5 py-1 rounded hover:bg-white/20 transition-colors uppercase font-bold text-center flex-1",
+                              subtitleLang === lang ? "bg-primary text-white" : "text-gray-300 bg-white/5"
+                            )}
+                            onClick={(e) => { e.stopPropagation(); setSubtitleLang(lang as SubtitleLang); }}
+                          >
+                            {lang === 'all' ? 'All' : lang}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="h-px bg-white/10 w-full" />
+
+                    {/* Speak Language (STT) */}
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-gray-400 font-bold px-1 mb-0.5">내가 말하는 언어 (STT)</span>
+                      <div className="flex gap-1 justify-between">
+                        {[
+                          { val: '', label: 'Auto' },
+                          { val: 'ko-KR', label: 'KO' },
+                          { val: 'en-US', label: 'EN' },
+                          { val: 'ja-JP', label: 'JA' },
+                          { val: 'zh-CN', label: 'ZH' },
+                        ].map((lang) => (
+                          <button
+                            key={'stt-' + lang.val}
+                            className={cn(
+                              "text-xs px-2.5 py-1 rounded hover:bg-white/20 transition-colors uppercase font-bold text-center flex-1",
+                              sttLang === lang.val ? "bg-blue-500 text-white" : "text-gray-300 bg-white/5"
+                            )}
+                            onClick={(e) => { 
+                              e.stopPropagation(); 
+                              setSttLang(lang.val); 
+                              // Restart STT with new language immediately
+                              if (recognitionRef.current) {
+                                recognitionRef.current.lang = lang.val;
+                                recognitionRef.current.stop(); // onend handler will restart it
+                              }
+                            }}
+                          >
+                            {lang.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* General Controls */}
@@ -1853,6 +2213,34 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     </select>
                   </div>
 
+                  <div className="pt-2 pb-2 -mx-2 px-4 space-y-3 bg-secondary/20 rounded-lg">
+                    <label className="text-sm font-bold text-gray-300 flex items-center gap-2">
+                      <Mic className="w-4 h-4 text-blue-400"/> 오디오 보정 (효과 적용 시 마이크 껐다 켜기)
+                    </label>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-400 flex items-center gap-2">
+                        <span>잡음 제거 (Noise Suppression)</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 cursor-pointer accent-blue-500"
+                        checked={noiseSuppression}
+                        onChange={(e) => setNoiseSuppression(e.target.checked)}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-gray-400 flex items-center gap-2">
+                        <span>에코 무시 (Echo Cancellation)</span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        className="w-4 h-4 cursor-pointer accent-blue-500"
+                        checked={echoCancellation}
+                        onChange={(e) => setEchoCancellation(e.target.checked)}
+                      />
+                    </div>
+                  </div>
+
                   <div className="w-full flex items-center space-x-2 pt-2">
                     <span title="Mic Volume">🎤</span>
                     <input
@@ -1882,6 +2270,64 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                       onChange={handleExitImmediatelyChange}
                     />
                   </div>
+
+                  {/* ⏱️ AI Subtitle Latency Stats (for demo presentation) */}
+                  {latencyHistory.length > 0 && (
+                    <div className="pt-4 border-t space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-bold">⚡ AI 자막 지연시간 통계</span>
+                        <button
+                          className="text-xs text-muted-foreground hover:text-red-400 transition-colors"
+                          onClick={() => setLatencyHistory([])}
+                        >
+                          초기화
+                        </button>
+                      </div>
+
+                      {/* Stats Grid */}
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="bg-secondary/60 rounded-lg p-2 text-center">
+                          <div className="text-lg font-bold text-green-400">
+                            {Math.round(latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length)}ms
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">평균</div>
+                        </div>
+                        <div className="bg-secondary/60 rounded-lg p-2 text-center">
+                          <div className="text-lg font-bold text-blue-400">
+                            {Math.min(...latencyHistory)}ms
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">최소</div>
+                        </div>
+                        <div className="bg-secondary/60 rounded-lg p-2 text-center">
+                          <div className="text-lg font-bold text-orange-400">
+                            {Math.max(...latencyHistory)}ms
+                          </div>
+                          <div className="text-[10px] text-muted-foreground">최대</div>
+                        </div>
+                      </div>
+
+                      {/* Mini Bar Chart */}
+                      <div className="flex items-end gap-0.5 h-10 bg-secondary/30 rounded p-1">
+                        {latencyHistory.slice(-20).map((ms, i) => {
+                          const maxMs = Math.max(...latencyHistory);
+                          const heightPct = Math.max(10, (ms / maxMs) * 100);
+                          const color = ms < 1000 ? 'bg-green-400' : ms < 2000 ? 'bg-yellow-400' : 'bg-red-400';
+                          return (
+                            <div
+                              key={i}
+                              title={`${ms}ms`}
+                              className={`flex-1 rounded-sm ${color} opacity-80 hover:opacity-100 transition-opacity`}
+                              style={{ height: `${heightPct}%` }}
+                            />
+                          );
+                        })}
+                      </div>
+                      <div className="flex justify-between text-[10px] text-muted-foreground">
+                        <span>최근 {latencyHistory.length}회 측정</span>
+                        <span>🟢 &lt;1s 🟡 1~2s 🔴 &gt;2s</span>
+                      </div>
+                    </div>
+                  )}
 
                   <Button className="w-full mt-4" onClick={copyLink}>
                     {isLinkCopied ? 'Link Copied!' : 'Copy Meeting Link'}

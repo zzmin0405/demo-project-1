@@ -52,8 +52,8 @@ DropdownMenuTrigger.displayName = "DropdownMenuTrigger"
 
 const DropdownMenuContent = React.forwardRef<
     HTMLDivElement,
-    React.HTMLAttributes<HTMLDivElement> & { align?: "start" | "end" | "center", isOpen?: boolean }
->(({ className, align = "center", isOpen, ...props }, ref) => {
+    React.HTMLAttributes<HTMLDivElement> & { align?: "start" | "end" | "center", isOpen?: boolean, setIsOpen?: (open: boolean) => void }
+>(({ className, align = "center", isOpen, setIsOpen, ...props }, ref) => {
     if (!isOpen) return null;
 
     return (
@@ -72,8 +72,8 @@ DropdownMenuContent.displayName = "DropdownMenuContent"
 
 const DropdownMenuItem = React.forwardRef<
     HTMLDivElement,
-    React.HTMLAttributes<HTMLDivElement> & { inset?: boolean }
->(({ className, inset, ...props }, ref) => (
+    React.HTMLAttributes<HTMLDivElement> & { inset?: boolean, isOpen?: boolean, setIsOpen?: (open: boolean) => void }
+>(({ className, inset, isOpen, setIsOpen, ...props }, ref) => (
     <div
         ref={ref}
         className={cn(
