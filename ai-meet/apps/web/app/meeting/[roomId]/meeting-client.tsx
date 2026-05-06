@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, type SyntheticEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { io, Socket } from 'socket.io-client';
 import { useSession } from "next-auth/react";
@@ -16,31 +16,40 @@ import { cn } from "@/lib/utils";
 import { ChatPanel } from "@/components/meeting/chat-panel";
 import { ParticipantCard } from "@/components/meeting/participant-card";
 import { ReactionBar } from "@/components/meeting/reaction-bar";
-import { ReactionOverlay, Reaction } from "@/components/meeting/reaction-overlay";
+import { Reaction } from "@/components/meeting/reaction-overlay";
 
 interface Participant {
   userId: string;
   username: string;
   hasVideo: boolean;
   isMuted: boolean;
+  canBroadcast?: boolean;
   avatar_url?: string;
 }
 
 type LayoutMode = 'speaker' | 'grid';
+type SttProvider = 'browser' | 'deepgram';
+type BroadcastMode = 'single' | 'all';
 
 export interface SubtitleData {
   id: string;
   userId: string;
   userName: string;
+  originalText?: string;
   ko: string;
   en: string;
   ja: string;
   zh: string;
+  isFinal?: boolean;
+  sequence?: number;
   latencyMs?: number;        // ⏱️ End-to-end latency in ms
   clientTimestamp?: number;  // Unix ms when STT captured the speech
+  serverReceivedAt?: number; // Unix ms when API received the transcript
+  translationStartedAt?: number;
+  translationFinishedAt?: number;
 }
 
-export type SubtitleLang = 'all' | 'ko' | 'en' | 'ja' | 'zh';
+export type SubtitleLang = 'ko' | 'en' | 'ja' | 'zh';
 
 export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
@@ -65,8 +74,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   // Subtitles State
   const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(false);
   const isSubtitlesEnabledRef = useRef(false);
-  const [subtitleLang, setSubtitleLang] = useState<SubtitleLang>('all'); // language to DISPLAY
+  const [subtitleLangs, setSubtitleLangs] = useState<SubtitleLang[]>(['ko', 'en', 'ja', 'zh']); // languages to DISPLAY
   const [sttLang, setSttLang] = useState(''); // language user SPEAKS (for STT accuracy)
+  const sttLangRef = useRef('');
+  const [sttProvider, setSttProvider] = useState<SttProvider>('browser');
+  const sttProviderRef = useRef<SttProvider>('browser');
   const [subtitles, setSubtitles] = useState<SubtitleData[]>([]);
   const recognitionRef = useRef<any>(null);
   
@@ -79,6 +91,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const [meetingTitle, setMeetingTitle] = useState("Meeting Room");
   const [isHost, setIsHost] = useState(false);
+  const [hostId, setHostId] = useState<string | null>(null);
+  const [isBroadcastPresenter, setIsBroadcastPresenter] = useState(false);
+  const isBroadcastPresenterRef = useRef(false);
+  const [broadcastMode, setBroadcastMode] = useState<BroadcastMode>('single');
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [tempTitle, setTempTitle] = useState("");
 
@@ -93,6 +109,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [showControls, setShowControls] = useState(false);
   const [showParticipantsPanel, setShowParticipantsPanel] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const isScreenSharingRef = useRef(false);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -107,6 +124,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const subtitleAudioRecorderRef = useRef<MediaRecorder | null>(null);
   const remoteVideoRefs = useRef<{ [userId: string]: HTMLVideoElement | null }>({});
   const socketIdToUserIdMap = useRef<{ [socketId: string]: string }>({});
   const userIdToSocketIdMap = useRef<{ [userId: string]: string }>({});
@@ -121,7 +139,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const mediaSourcesRef = useRef<{ [socketId: string]: MediaSource }>({});
   const sourceBuffersRef = useRef<{ [socketId: string]: SourceBuffer }>({});
   const chunkQueueRef = useRef<{ [socketId: string]: Blob[] }>({});
+  const pendingMediaChunksRef = useRef<{ chunk: Blob; mimeType: string; timestamp: number }[]>([]);
+  const remoteMimeTypesRef = useRef<{ [socketId: string]: string }>({});
   const mediaSourceUrlsRef = useRef<{ [socketId: string]: string }>({}); // Track created Object URLs
+  const remoteVideosAwaitingUserGestureRef = useRef<Set<HTMLVideoElement>>(new Set());
+  const hasUserInteractedRef = useRef(false);
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
   const [showEndCallModal, setShowEndCallModal] = useState(false);
@@ -175,6 +197,32 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     setExitImmediately(savedSetting);
   }, []);
 
+  useEffect(() => {
+    const resumeBlockedRemoteVideos = () => {
+      hasUserInteractedRef.current = true;
+      const blockedVideos = Array.from(remoteVideosAwaitingUserGestureRef.current);
+      remoteVideosAwaitingUserGestureRef.current.clear();
+
+      blockedVideos.forEach(videoElement => {
+        videoElement.muted = false;
+        videoElement.play().catch(error => {
+          console.warn('[Autoplay] Remote video still blocked after user gesture:', error);
+          remoteVideosAwaitingUserGestureRef.current.add(videoElement);
+        });
+      });
+    };
+
+    window.addEventListener('click', resumeBlockedRemoteVideos, { capture: true });
+    window.addEventListener('touchstart', resumeBlockedRemoteVideos, { capture: true });
+    window.addEventListener('keydown', resumeBlockedRemoteVideos, { capture: true });
+
+    return () => {
+      window.removeEventListener('click', resumeBlockedRemoteVideos, { capture: true });
+      window.removeEventListener('touchstart', resumeBlockedRemoteVideos, { capture: true });
+      window.removeEventListener('keydown', resumeBlockedRemoteVideos, { capture: true });
+    };
+  }, []);
+
   // --- Subtitles STT Setup ---
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -190,6 +238,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
          let interimFlushTimer: ReturnType<typeof setTimeout> | null = null;
          let lastInterimText = '';
          let lastSentText = ''; // Prevent duplicate sends
+         let lastInterimSentAt = 0;
+         let sttSequence = 0;
+
+         const emitSttText = (text: string, isFinal: boolean) => {
+            if (!isBroadcastPresenterRef.current || !text || !socketRef.current) return;
+            sttSequence += 1;
+            lastSentText = text;
+            socketRef.current.emit('stt-recognize', {
+              roomId,
+              text,
+              isFinal,
+              sequence: sttSequence,
+              sourceLang: sttLangRef.current,
+              clientTimestamp: Date.now(),
+            });
+         };
 
          recognition.onresult = (event: any) => {
             for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -200,30 +264,30 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 if (interimFlushTimer) { clearTimeout(interimFlushTimer); interimFlushTimer = null; }
                 if (transcript && transcript !== lastSentText && socketRef.current) {
                     console.log("[STT] Final:", transcript);
-                    lastSentText = transcript;
-                    socketRef.current.emit('stt-recognize', {
-                      roomId,
-                      text: transcript,
-                      clientTimestamp: Date.now(),
-                    });
+                    emitSttText(transcript, true);
+                } else if (transcript && socketRef.current) {
+                    emitSttText(transcript, true);
                 }
                 lastInterimText = '';
               } else {
-                // ⏱️ Interim result — if text stays stable for 1s, force-send it
+                // ⏱️ Interim result — throttle updates so captions feel live without flooding translation.
                 lastInterimText = transcript;
-                if (interimFlushTimer) clearTimeout(interimFlushTimer);
-                interimFlushTimer = setTimeout(() => {
-                  if (lastInterimText && lastInterimText !== lastSentText && socketRef.current) {
-                    console.log("[STT] Interim flush (1s stable):", lastInterimText);
-                    lastSentText = lastInterimText;
-                    socketRef.current.emit('stt-recognize', {
-                      roomId,
-                      text: lastInterimText,
-                      clientTimestamp: Date.now(),
-                    });
-                  }
-                  lastInterimText = '';
-                }, 1000); // 1초 동안 변화 없으면 강제 전송
+                const now = Date.now();
+                const hasMeaningfulChange = transcript.length >= 3 && transcript !== lastSentText;
+                if (hasMeaningfulChange && now - lastInterimSentAt >= 700) {
+                  console.log("[STT] Interim stream:", transcript);
+                  lastInterimSentAt = now;
+                  emitSttText(transcript, false);
+                } else {
+                  if (interimFlushTimer) clearTimeout(interimFlushTimer);
+                  interimFlushTimer = setTimeout(() => {
+                    if (lastInterimText && lastInterimText !== lastSentText && socketRef.current) {
+                      console.log("[STT] Interim flush:", lastInterimText);
+                      lastInterimSentAt = Date.now();
+                      emitSttText(lastInterimText, false);
+                    }
+                  }, 700);
+                }
               }
             }
          };
@@ -272,22 +336,103 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   useEffect(() => {
     isSubtitlesEnabledRef.current = isSubtitlesEnabled;
-    if (isSubtitlesEnabled && !isMuted && recognitionRef.current) {
+    if (isBroadcastPresenter && isSubtitlesEnabled && !isMuted && sttProvider === 'browser' && recognitionRef.current) {
       try { recognitionRef.current.start(); console.log("[STT] Started (CC on + mic on)"); } catch (e) {}
     } else if (recognitionRef.current) {
       try { recognitionRef.current.stop(); console.log("[STT] Stopped"); } catch (e) {}
     }
-  }, [isSubtitlesEnabled]);
+  }, [isBroadcastPresenter, isSubtitlesEnabled, isMuted, sttProvider]);
+
+  useEffect(() => {
+    sttLangRef.current = sttLang;
+  }, [sttLang]);
+
+  useEffect(() => {
+    socketRef.current?.emit('subtitle-language-changed', {
+      roomId,
+      langs: subtitleLangs,
+    });
+  }, [roomId, subtitleLangs]);
+
+  useEffect(() => {
+    sttProviderRef.current = sttProvider;
+  }, [sttProvider]);
 
   // STT follows mic mute state: muted → stop STT, unmuted → start STT (if CC is on)
   useEffect(() => {
     if (!recognitionRef.current) return;
-    if (isSubtitlesEnabled && !isMuted) {
+    if (isBroadcastPresenter && isSubtitlesEnabled && !isMuted && sttProvider === 'browser') {
       try { recognitionRef.current.start(); console.log("[STT] Resumed (mic unmuted)"); } catch (e) {}
     } else if (isMuted) {
       try { recognitionRef.current.stop(); console.log("[STT] Paused (mic muted)"); } catch (e) {}
     }
-  }, [isMuted, isSubtitlesEnabled]);
+  }, [isBroadcastPresenter, isMuted, isSubtitlesEnabled, sttProvider]);
+
+  useEffect(() => {
+    const shouldUseServerStt = isBroadcastPresenter && isSubtitlesEnabled && !isMuted;
+    if (!shouldUseServerStt) {
+      stopSubtitleAudioStreaming();
+      socketRef.current?.emit('subtitle-stt-stop', { roomId });
+      return;
+    }
+
+    socketRef.current?.emit('subtitle-stt-start', {
+      roomId,
+      sourceLang: sttLangRef.current,
+    });
+
+    return () => {
+      stopSubtitleAudioStreaming();
+      socketRef.current?.emit('subtitle-stt-stop', { roomId });
+    };
+  }, [isBroadcastPresenter, isMuted, isSubtitlesEnabled, roomId, sttLang]);
+
+  useEffect(() => {
+    if (sttProvider === 'deepgram' && isBroadcastPresenter && isSubtitlesEnabled && !isMuted) {
+      try { recognitionRef.current?.stop(); } catch (e) {}
+      setupSubtitleAudioStreaming();
+    } else {
+      stopSubtitleAudioStreaming();
+    }
+  }, [isBroadcastPresenter, isMuted, isSubtitlesEnabled, sttProvider]);
+
+  const applyBroadcastPresenterState = useCallback((canBroadcast: boolean) => {
+    setIsBroadcastPresenter(canBroadcast);
+    isBroadcastPresenterRef.current = canBroadcast;
+
+    if (!canBroadcast) {
+      stopLocalBroadcast();
+      try { recognitionRef.current?.stop(); } catch (e) {}
+      socketRef.current?.emit('subtitle-stt-stop', { roomId });
+      return;
+    }
+
+    let initialVideoOn = false;
+    let initialMuted = true;
+
+    if (typeof window !== 'undefined') {
+      const storedSettings = sessionStorage.getItem(`meeting-settings-${roomId}`);
+      if (storedSettings) {
+        try {
+          const settings = JSON.parse(storedSettings);
+          if (settings.joinVideoOff !== undefined) initialVideoOn = !settings.joinVideoOff;
+          if (settings.joinMuted !== undefined) initialMuted = settings.joinMuted;
+        } catch (error) {
+          console.error("Failed to parse meeting settings", error);
+        }
+      }
+    }
+
+    if (localStreamRef.current && localStreamRef.current.active) {
+      const outgoingStream = createOutgoingStream();
+      if (outgoingStream) setupMediaRecorder(outgoingStream);
+      return;
+    }
+
+    initializeMediaStream(initialVideoOn, initialMuted, true)
+      .then(() => console.log('Client: presenter media initialized successfully.'))
+      .catch(err => console.error('Client: presenter media initialization failed:', err));
+  }, [roomId]);
 
   // Dynamic Device Detection
   useEffect(() => {
@@ -356,6 +501,27 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       const socket = socketRef.current;
+      const syncRemoteParticipants = (incomingParticipants: (Participant & { socketId: string })[]) => {
+        const filteredParticipants = incomingParticipants.filter(p => p.userId !== currentUserId);
+        const activeRemoteUserIds = new Set(filteredParticipants.map(p => p.userId));
+
+        incomingParticipants.forEach(p => {
+          if (p.userId !== currentUserId) {
+            socketIdToUserIdMap.current[p.socketId] = p.userId;
+            userIdToSocketIdMap.current[p.userId] = p.socketId;
+          }
+        });
+
+        Object.entries(userIdToSocketIdMap.current).forEach(([userId, socketId]) => {
+          if (!activeRemoteUserIds.has(userId)) {
+            cleanupMediaSource(socketId);
+            delete socketIdToUserIdMap.current[socketId];
+            delete userIdToSocketIdMap.current[userId];
+          }
+        });
+
+        setParticipants(filteredParticipants);
+      };
 
       socket.on('connect_error', (err) => {
         console.error(`[SocketDebug] Connection Error: ${err.message}`, err);
@@ -371,6 +537,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('connect', () => {
         console.log('Client: Connected to WebSocket server with socketId:', socket.id);
+        flushPendingMediaChunks(socket);
 
         // Calculate initial settings
         let initialVideoOn = false;
@@ -393,58 +560,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           hasVideo: initialVideoOn, // Correct initial state
           isMuted: initialMuted     // Correct initial state
         });
-
-        // RECONNECTION HANDLING:
-        // If we already have an active stream, DO NOT re-initialize it. 
-        // Re-initialization stops tracks and kills the camera, causing black screens on mobile flakiness.
-        if (localStreamRef.current && localStreamRef.current.active) {
-          console.log('Client: Stream already active on reconnect. Resuming MediaRecorder...');
-
-          // Re-construct mixed stream for recorder (Video + Processed Audio)
-          const tracks: MediaStreamTrack[] = [];
-          const videoTrack = localStreamRef.current.getVideoTracks()[0];
-          if (videoTrack) tracks.push(videoTrack);
-
-          const processedAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
-          const rawAudioTrack = localStreamRef.current.getAudioTracks()[0];
-
-          if (processedAudioTrack) {
-            tracks.push(processedAudioTrack);
-          } else if (rawAudioTrack) {
-            tracks.push(rawAudioTrack);
-          }
-
-          if (tracks.length > 0) {
-            const mixedStream = new MediaStream(tracks);
-            setupMediaRecorder(mixedStream);
-          }
-        } else {
-          console.log('Client: Initial connection or stream lost. Initializing media...');
-          initializeMediaStream(initialVideoOn, initialMuted, true)
-            .then(() => console.log('Client: initializeMediaStream completed successfully.'))
-            .catch(err => console.error('Client: initializeMediaStream failed:', err));
-        }
-      });
-
-      socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string }) => {
-        console.log('Client: room-state received', data);
-        const filteredParticipants = data.participants.filter(p => p.userId !== currentUserId);
-
-        if (data.title) setMeetingTitle(data.title);
-        if (data.hostId && data.hostId === currentUserId) {
-          setIsHost(true);
-          console.log('Client: You are the host.');
-        }
-
-        // Populate maps immediately
-        data.participants.forEach(p => {
-          if (p.userId !== currentUserId) {
-            socketIdToUserIdMap.current[p.socketId] = p.userId;
-            userIdToSocketIdMap.current[p.userId] = p.socketId;
-          }
+        socket.emit('subtitle-language-changed', {
+          roomId,
+          langs: subtitleLangs,
         });
 
-        setParticipants(filteredParticipants);
+        // Media capture starts after room-state confirms this socket is the presenter.
+      });
+
+      socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string, canBroadcast?: boolean; broadcastMode?: BroadcastMode }) => {
+        console.log('Client: room-state received', data);
+        const canBroadcast = Boolean(data.canBroadcast);
+
+        if (data.title) setMeetingTitle(data.title);
+        if (data.hostId) setHostId(data.hostId);
+        if (data.broadcastMode) setBroadcastMode(data.broadcastMode);
+        setIsHost(Boolean(data.hostId && data.hostId === currentUserId));
+
+        syncRemoteParticipants(data.participants);
+        applyBroadcastPresenterState(canBroadcast);
       });
 
       socket.on('user-joined', async (data: Participant & { socketId: string }) => {
@@ -473,9 +607,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         // Restart MediaRecorder to send a fresh Init Segment (Keyframe) to the new user
         // Use ref to get the latest value (state may be stale in this closure)
-        if (localStreamRef.current && localVideoOnRef.current) {
+        if (isBroadcastPresenterRef.current && localStreamRef.current && localVideoOnRef.current) {
           console.log(`[UserJoined] Restarting MediaRecorder to send fresh Init Segment to ${data.username}`);
-          setupMediaRecorder(localStreamRef.current);
+          const outgoingStream = createOutgoingStream();
+          if (outgoingStream) setupMediaRecorder(outgoingStream);
         }
       });
 
@@ -490,10 +625,35 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         setParticipants(prev => prev.filter(p => p.userId !== data.userId));
       });
 
-      socket.on('media-chunk', async (data: { socketId: string, userId?: string, chunk: ArrayBuffer | any, mimeType?: string }) => {
+      socket.on('broadcast-presenter-changed', (data: { presenterUserId: string; broadcastMode?: BroadcastMode; participants: (Participant & { socketId: string })[] }) => {
+        console.log(`[Presenter] Presenter changed to ${data.presenterUserId}`);
+
+        setBroadcastMode(data.broadcastMode ?? 'single');
+        syncRemoteParticipants(data.participants);
+        applyBroadcastPresenterState(data.presenterUserId === currentUserId);
+      });
+
+      socket.on('participant-list-changed', (data: { presenterUserId?: string; broadcastMode?: BroadcastMode; participants: (Participant & { socketId: string })[] }) => {
+        console.log('[Participants] Participant list resynced', data);
+        if (data.broadcastMode) setBroadcastMode(data.broadcastMode);
+        syncRemoteParticipants(data.participants);
+        const currentParticipant = data.participants.find(p => p.userId === currentUserId);
+        if (currentParticipant) {
+          applyBroadcastPresenterState(Boolean(currentParticipant.canBroadcast));
+        }
+      });
+
+      socket.on('broadcast-mode-changed', (data: { broadcastMode: BroadcastMode; presenterUserId?: string; participants: (Participant & { socketId: string })[] }) => {
+        console.log(`[Presenter] Broadcast mode changed to ${data.broadcastMode}`);
+        setBroadcastMode(data.broadcastMode);
+        syncRemoteParticipants(data.participants);
+        const currentParticipant = data.participants.find(p => p.userId === currentUserId);
+        applyBroadcastPresenterState(Boolean(currentParticipant?.canBroadcast));
+      });
+
+      socket.on('media-chunk', async (data: { socketId: string, userId?: string, chunk: ArrayBuffer | any, mimeType?: string, timestamp?: number }) => {
         const { socketId, chunk, mimeType = 'video/webm; codecs="vp8, opus"' } = data;
         const userId = data.userId;
-        console.log(`[MediaChunk] Received from ${socketId} (User: ${userId}), size: ${chunk.byteLength || chunk.length}`);
         const blob = new Blob([chunk], { type: mimeType });
 
         // STRICT IDENTITY CHECK: Only use userId from payload.
@@ -512,6 +672,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         // Update map for reference
         socketIdToUserIdMap.current[socketId] = userId;
         userIdToSocketIdMap.current[userId] = socketId;
+        remoteMimeTypesRef.current[socketId] = mimeType;
 
         // Ensure MediaSource is open
         if (!mediaSourcesRef.current[socketId] || mediaSourcesRef.current[socketId].readyState === 'closed') {
@@ -522,9 +683,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
 
         // Measure Latency
-        if ((data as any).timestamp) {
+        if (data.timestamp) {
           const now = Date.now();
-          const transmissionLatency = now - (data as any).timestamp;
+          const transmissionLatency = now - data.timestamp;
           if (transmissionLatency > 500 || Math.random() < 0.1) {
             console.log(`[Latency] End-to-End: ${transmissionLatency}ms (${userId})`);
           }
@@ -626,20 +787,74 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       });
 
+      socket.on('stt-provider-state', (data: { provider: SttProvider; enabled: boolean; reason?: string; model?: string }) => {
+        if (data.provider === 'deepgram' && data.enabled) {
+          console.log(`[STT] Deepgram streaming enabled (${data.model || 'default model'})`);
+          setSttProvider('deepgram');
+        } else {
+          console.log(`[STT] Falling back to browser STT (${data.reason || 'server unavailable'})`);
+          setSttProvider('browser');
+        }
+      });
+
       // STREAMING SUBTITLE HANDLERS (3-step pipeline)
 
+      const upsertStreamingSubtitle = (data: Partial<SubtitleData> & { id: string; userId: string; userName: string; originalText?: string; clientTimestamp?: number; serverReceivedAt?: number; translationStartedAt?: number; translationFinishedAt?: number }) => {
+        setSubtitles(prev => {
+          const existing = prev.find(s => s.id === data.id);
+          const nextSubtitle: SubtitleData = existing ? {
+            ...existing,
+            ...data,
+            ko: data.ko ?? data.originalText ?? existing.ko,
+            en: data.en ?? existing.en,
+            ja: data.ja ?? existing.ja,
+            zh: data.zh ?? existing.zh,
+            clientTimestamp: data.clientTimestamp ?? existing.clientTimestamp,
+            serverReceivedAt: data.serverReceivedAt ?? existing.serverReceivedAt,
+            translationStartedAt: data.translationStartedAt ?? existing.translationStartedAt,
+            translationFinishedAt: data.translationFinishedAt ?? existing.translationFinishedAt,
+          } : {
+            id: data.id,
+            userId: data.userId,
+            userName: data.userName,
+            originalText: data.originalText,
+            ko: data.ko ?? data.originalText ?? '',
+            en: data.en ?? '...',
+            ja: data.ja ?? '...',
+            zh: data.zh ?? '...',
+            isFinal: data.isFinal,
+            sequence: data.sequence,
+            latencyMs: undefined,
+            clientTimestamp: data.clientTimestamp,
+            serverReceivedAt: data.serverReceivedAt,
+            translationStartedAt: data.translationStartedAt,
+            translationFinishedAt: data.translationFinishedAt,
+          };
+
+          const withoutCurrent = prev.filter(s => s.id !== data.id);
+          const newSubtitles = [...withoutCurrent, nextSubtitle];
+          return newSubtitles.length > 5 ? newSubtitles.slice(-5) : newSubtitles;
+        });
+      };
+
       // Step 1: Original text arrives instantly → show placeholder immediately
-      socket.on('subtitle-stream-start', (data: { id: string; userId: string; userName: string; originalText: string; clientTimestamp?: number }) => {
+      socket.on('subtitle-stream-start', (data: SubtitleData & { originalText: string }) => {
         const placeholder: SubtitleData = {
           id: data.id,
           userId: data.userId,
           userName: data.userName,
+          originalText: data.originalText,
           ko: data.originalText,
           en: '...',
           ja: '...',
           zh: '...',
+          isFinal: data.isFinal,
+          sequence: data.sequence,
           latencyMs: undefined, // Not yet known
           clientTimestamp: data.clientTimestamp,
+          serverReceivedAt: data.serverReceivedAt,
+          translationStartedAt: data.translationStartedAt,
+          translationFinishedAt: data.translationFinishedAt,
         };
         setSubtitles(prev => {
           const newSubtitles = [...prev, placeholder];
@@ -652,24 +867,27 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }, 8000);
       });
 
-      // Step 2: Raw streaming tokens arrive (for visual typing feedback - optional)
-      // We intentionally skip re-rendering partial JSON to avoid flickering
-      // subtitle-stream-chunk is received but we wait for the final broadcast
+      // Step 2: Interim translated captions update the same subtitle row in-place.
+      socket.on('subtitle-stream-update', (data: SubtitleData & { originalText?: string }) => {
+        upsertStreamingSubtitle(data);
+      });
 
       // Step 3: Final parsed translations arrive → replace placeholder in-place
       socket.on('subtitle-broadcast', (data: SubtitleData) => {
-        // ⏱️ Calculate total end-to-end latency
-        const latencyMs = data.clientTimestamp ? Date.now() - data.clientTimestamp : undefined;
+        const latencyMs = data.translationStartedAt && data.translationFinishedAt
+          ? data.translationFinishedAt - data.translationStartedAt
+          : data.serverReceivedAt
+          ? Date.now() - data.serverReceivedAt
+          : data.clientTimestamp
+            ? Date.now() - data.clientTimestamp
+            : undefined;
         if (latencyMs) {
           console.log(`[Subtitle Latency] ${latencyMs}ms`);
           // Keep last 20 measurements for rolling average
           setLatencyHistory(prev => [...prev.slice(-19), latencyMs]);
         }
 
-        setSubtitles(prev =>
-          // Replace the matching placeholder with final translated version
-          prev.map(s => s.id === data.id ? { ...data, latencyMs } : s)
-        );
+        upsertStreamingSubtitle({ ...data, latencyMs, isFinal: true });
         // Auto-remove after 6 seconds
         setTimeout(() => {
           setSubtitles(prev => prev.filter(s => s.id !== data.id));
@@ -685,25 +903,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       socket.on('request-keyframe', ({ fromUserId }: { fromUserId: string }) => {
+        if (!isBroadcastPresenterRef.current) return;
         console.log(`[Keyframe] Received request for keyframe from ${fromUserId}, restarting MediaRecorder...`);
-        if (localStreamRef.current && localVideoOnRef.current) {
-          setupMediaRecorder(localStreamRef.current);
-        } else if (isScreenSharing && screenStreamRef.current) {
-          // If we are screen sharing, restart that stream instead
-          // Need to reconstruct the mixed stream
-          const tracks: MediaStreamTrack[] = [];
-          const screenVideoTrack = screenStreamRef.current.getVideoTracks()[0];
-          if (screenVideoTrack) tracks.push(screenVideoTrack);
-          const screenAudioTrack = screenStreamRef.current.getAudioTracks()[0];
-          const micAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
-          if (screenAudioTrack) {
-            tracks.push(screenAudioTrack);
-          } else if (micAudioTrack) {
-            tracks.push(micAudioTrack);
-          }
-          const mixedStream = new MediaStream(tracks);
-          setupMediaRecorder(mixedStream);
-        }
+        const outgoingStream = createOutgoingStream(isScreenSharingRef.current ? screenStreamRef.current : localStreamRef.current);
+        if (outgoingStream) setupMediaRecorder(outgoingStream);
       });
 
       socket.on('chat-error', (data: { message: string }) => {
@@ -746,6 +949,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     return () => {
       isInitialized.current = false;
+      stopSubtitleAudioStreaming();
+      socketRef.current?.emit('subtitle-stt-stop', { roomId });
       if (socketRef.current) {
         console.log('Client: Disconnecting socket on cleanup');
         socketRef.current.disconnect();
@@ -845,12 +1050,55 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   }, [localStream, localVideoOn, isScreenSharing]);
 
+  useEffect(() => {
+    isScreenSharingRef.current = isScreenSharing;
+  }, [isScreenSharing]);
+
+  const createOutgoingStream = (videoSource: MediaStream | null = localStreamRef.current) => {
+    if (!isBroadcastPresenterRef.current) return null;
+
+    const tracks: MediaStreamTrack[] = [];
+    const videoTrack = videoSource?.getVideoTracks()[0];
+    if (videoTrack) tracks.push(videoTrack);
+
+    const screenAudioTrack = videoSource && videoSource !== localStreamRef.current
+      ? videoSource.getAudioTracks()[0]
+      : undefined;
+    const processedAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
+    const rawAudioTrack = localStreamRef.current?.getAudioTracks()[0];
+    if (screenAudioTrack) {
+      tracks.push(screenAudioTrack);
+    } else if (processedAudioTrack) {
+      tracks.push(processedAudioTrack);
+    } else if (rawAudioTrack) {
+      tracks.push(rawAudioTrack);
+    }
+
+    return tracks.length > 0 ? new MediaStream(tracks) : null;
+  };
+
+  const flushPendingMediaChunks = (socket: Socket | null = socketRef.current) => {
+    if (!isBroadcastPresenterRef.current || !socket?.connected || pendingMediaChunksRef.current.length === 0) return;
+
+    const pending = pendingMediaChunksRef.current.splice(0, pendingMediaChunksRef.current.length);
+    for (const item of pending) {
+      socket.emit('media-chunk', item);
+    }
+  };
+
   const setupMediaRecorder = (stream: MediaStream) => {
+    if (!isBroadcastPresenterRef.current) {
+      stopMediaRecorder();
+      return;
+    }
+
     if (mediaRecorderRef.current) {
       // Prevent old recorder from firing 'ondataavailable' after we decide to switch
       mediaRecorderRef.current.ondataavailable = null;
       mediaRecorderRef.current.onstop = null;
-      mediaRecorderRef.current.stop();
+      if (mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
     }
     if (socketRef.current && stream) {
       const hasVideo = stream.getVideoTracks().length > 0;
@@ -881,24 +1129,154 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         mediaRecorder.ondataavailable = (event) => {
           // console.log(`[MediaRecorder] ondataavailable triggered, data size: ${event.data?.size || 0}`);
-          if (event.data && event.data.size > 0 && socketRef.current) {
-            // console.log(`[MediaRecorder] Emitting media-chunk, size: ${event.data.size}, mimeType: ${mimeType}`);
-            socketRef.current.emit('media-chunk', {
+          if (event.data && event.data.size > 0) {
+            const mediaPacket = {
               chunk: event.data,
               mimeType,
               timestamp: Date.now() // Add timestamp for latency measurement
-            });
+            };
+
+            if (socketRef.current?.connected) {
+              flushPendingMediaChunks();
+              socketRef.current.emit('media-chunk', mediaPacket);
+            } else {
+              if (pendingMediaChunksRef.current.length > 8) {
+                pendingMediaChunksRef.current.shift();
+              }
+              pendingMediaChunksRef.current.push(mediaPacket);
+            }
           } else {
             console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
           }
         };
         mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(500); // 500ms 딜레이로 변경하여 과도한 패킷 분할(Fragmentation) 오버헤드 방지
-        console.log('Client: MediaRecorder started with 500ms intervals');
+        mediaRecorder.start(200); // 0.2s chunks for lower media relay latency
+        console.log('Client: MediaRecorder started with 200ms intervals');
       } catch (e) {
         console.error('MediaRecorder setup failed:', e);
       }
     }
+  };
+
+  const stopMediaRecorder = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.ondataavailable = null;
+      mediaRecorderRef.current.onstop = null;
+      if (mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      mediaRecorderRef.current = null;
+    }
+    pendingMediaChunksRef.current = [];
+  };
+
+  const setupSubtitleAudioStreaming = () => {
+    if (!isBroadcastPresenterRef.current || sttProviderRef.current !== 'deepgram') return;
+    if (subtitleAudioRecorderRef.current?.state === 'recording') return;
+
+    const audioTrack = audioDestinationRef.current?.stream.getAudioTracks()[0]
+      ?? localStreamRef.current?.getAudioTracks()[0];
+    if (!audioTrack) return;
+
+    const audioStream = new MediaStream([audioTrack]);
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm; codecs=opus')
+      ? 'audio/webm; codecs=opus'
+      : 'audio/webm';
+
+    try {
+      const recorder = new MediaRecorder(audioStream, { mimeType });
+      recorder.ondataavailable = (event) => {
+        if (!event.data || event.data.size === 0) return;
+        if (!socketRef.current?.connected) return;
+
+        socketRef.current.emit('stt-audio-chunk', {
+          roomId,
+          chunk: event.data,
+          mimeType,
+          clientTimestamp: Date.now(),
+        });
+      };
+      recorder.onstop = () => {
+        socketRef.current?.emit('subtitle-stt-stop', { roomId });
+      };
+      subtitleAudioRecorderRef.current = recorder;
+      recorder.start(250);
+      console.log('[STT] Deepgram audio recorder started');
+    } catch (error) {
+      console.error('[STT] Failed to start Deepgram audio recorder:', error);
+      setSttProvider('browser');
+    }
+  };
+
+  const stopSubtitleAudioStreaming = () => {
+    if (subtitleAudioRecorderRef.current) {
+      subtitleAudioRecorderRef.current.ondataavailable = null;
+      subtitleAudioRecorderRef.current.onstop = null;
+      if (subtitleAudioRecorderRef.current.state !== 'inactive') {
+        subtitleAudioRecorderRef.current.stop();
+      }
+      subtitleAudioRecorderRef.current = null;
+    }
+  };
+
+  const stopLocalBroadcast = () => {
+    stopSubtitleAudioStreaming();
+    stopMediaRecorder();
+
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => {
+        track.onended = null;
+        track.stop();
+      });
+      screenStreamRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+
+    if (speakingIntervalRef.current) {
+      clearInterval(speakingIntervalRef.current);
+      speakingIntervalRef.current = null;
+    }
+
+    setLocalStream(null);
+    setLocalVideoOn(false);
+    localVideoOnRef.current = false;
+    setIsMuted(true);
+    isMutedRef.current = true;
+    setIsScreenSharing(false);
+    isScreenSharingRef.current = false;
+  };
+
+  const playRemoteVideo = (videoElement: HTMLVideoElement, userId: string) => {
+    if (hasUserInteractedRef.current) {
+      videoElement.muted = false;
+    }
+
+    videoElement.play().then(() => {
+      console.log(`[VideoRef] Playback started for ${userId}`);
+    }).catch(error => {
+      if (error.name === 'NotAllowedError') {
+        console.warn(`[VideoRef] Autoplay with audio blocked for ${userId}; playing muted until user interaction.`);
+        remoteVideosAwaitingUserGestureRef.current.add(videoElement);
+        videoElement.muted = true;
+        videoElement.play().catch(mutedError => {
+          console.warn(`[VideoRef] Muted autoplay also failed for ${userId}`, mutedError);
+        });
+        return;
+      }
+
+      if (error.name !== 'AbortError') {
+        console.error(`[VideoRef] Playback failed for ${userId}`, error);
+      }
+    });
   };
 
   const setupMediaSource = (userId: string, socketId: string, mimeType: string = 'video/webm; codecs="vp8, opus"') => {
@@ -914,7 +1292,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       const url = URL.createObjectURL(mediaSource);
       mediaSourceUrlsRef.current[socketId] = url;
       videoElement.src = url;
-      videoElement.onloadedmetadata = () => videoElement.play().catch(e => console.error("Autoplay failed", e));
+      videoElement.onloadedmetadata = () => playRemoteVideo(videoElement, userId);
     }
 
     mediaSource.addEventListener('sourceopen', async () => {
@@ -1108,6 +1486,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     delete mediaSourcesRef.current[socketId];
     delete sourceBuffersRef.current[socketId];
     delete chunkQueueRef.current[socketId];
+    delete remoteMimeTypesRef.current[socketId];
+    const blockedVideoUserId = socketIdToUserIdMap.current[socketId];
+    const videoElement = blockedVideoUserId ? remoteVideoRefs.current[blockedVideoUserId] : undefined;
+    if (videoElement) {
+      remoteVideosAwaitingUserGestureRef.current.delete(videoElement);
+    }
 
     // Clear cached URL so we don't reuse a revoked one
     if (mediaSourceUrlsRef.current[socketId]) {
@@ -1117,6 +1501,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
 
   const initializeMediaStream = async (initialVideoOn: boolean = false, initialMuted: boolean = true, isInitial: boolean = false) => {
+    if (!isBroadcastPresenterRef.current) {
+      stopLocalBroadcast();
+      return;
+    }
+
     try {
       console.log(`Client: Initializing media stream (Initial video: ${initialVideoOn}, Initial muted: ${initialMuted})...`);
 
@@ -1250,15 +1639,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       }, 100); // Check every 100ms
       // -------------------------------
 
-      // Create a mixed stream for MediaRecorder (ALWAYS includes both audio and video)
-      const processedAudioTrack = destination.stream.getAudioTracks()[0];
-      const tracks: MediaStreamTrack[] = [...stream.getVideoTracks()];
-      if (processedAudioTrack) {
-        tracks.push(processedAudioTrack);
-      }
-      const mixedStream = new MediaStream(tracks);
-      // -------------------------------------------
-
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
@@ -1272,7 +1652,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       isMutedRef.current = initialMuted;
       console.log('Client: Media stream initialized (always-on mode).');
 
-      setupMediaRecorder(mixedStream);
+      const outgoingStream = createOutgoingStream(stream);
+      if (outgoingStream) setupMediaRecorder(outgoingStream);
 
       // Emit initial camera state
       socketRef.current?.emit('camera-state-changed', {
@@ -1317,6 +1698,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   };
 
   const toggleCamera = () => {
+    if (!isBroadcastPresenterRef.current) return;
+
     console.log('[toggleCamera] Called');
     const videoTrack = localStreamRef.current?.getVideoTracks()[0];
     if (!videoTrack) {
@@ -1335,7 +1718,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     // and notify receivers to recreate their MediaSource
     if (videoTrack.enabled && localStreamRef.current) {
       console.log('[toggleCamera] Camera ON: Restarting MediaRecorder and sending stream-reset');
-      setupMediaRecorder(localStreamRef.current);
+      const outgoingStream = createOutgoingStream();
+      if (outgoingStream) setupMediaRecorder(outgoingStream);
       socketRef.current?.emit('stream-reset', { roomId, userId: currentUserId });
     }
 
@@ -1348,6 +1732,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   };
 
   const toggleScreenShare = async () => {
+    if (!isBroadcastPresenterRef.current) return;
+
     if (isScreenSharing) {
       // Stop screen sharing safely (prevent recursive onended loop)
       if (screenStreamRef.current) {
@@ -1357,20 +1743,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       }
       screenStreamRef.current = null;
+      isScreenSharingRef.current = false;
       setIsScreenSharing(false);
 
       // Restore camera stream
       if (localStreamRef.current) {
-        // Re-construct mixed stream for recorder
-        const tracks: MediaStreamTrack[] = [];
-        const videoTrack = localStreamRef.current.getVideoTracks()[0];
-        if (videoTrack) tracks.push(videoTrack);
-
-        const processedAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
-        if (processedAudioTrack) tracks.push(processedAudioTrack);
-
-        const mixedStream = new MediaStream(tracks);
-        setupMediaRecorder(mixedStream);
+        const outgoingStream = createOutgoingStream();
+        if (outgoingStream) setupMediaRecorder(outgoingStream);
 
         // Notify others
         socketRef.current?.emit('camera-state-changed', {
@@ -1389,6 +1768,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
 
         screenStreamRef.current = screenStream;
+        isScreenSharingRef.current = true;
         setIsScreenSharing(true);
 
         // Handle browser's "Stop Sharing" button
@@ -1396,23 +1776,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           toggleScreenShare(); // Recurse to stop and restore
         };
 
-        // Re-construct mixed stream for recorder (Screen Video + Mic/System Audio)
-        const tracks: MediaStreamTrack[] = [];
-        const screenVideoTrack = screenStream.getVideoTracks()[0];
-        if (screenVideoTrack) tracks.push(screenVideoTrack);
-
-        // Optionally mix in system audio if available, or stay with mic
-        const screenAudioTrack = screenStream.getAudioTracks()[0];
-        const micAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
-
-        if (screenAudioTrack) {
-          tracks.push(screenAudioTrack);
-        } else if (micAudioTrack) {
-          tracks.push(micAudioTrack);
-        }
-
-        const mixedStream = new MediaStream(tracks);
-        setupMediaRecorder(mixedStream);
+        const outgoingStream = createOutgoingStream(screenStream);
+        if (outgoingStream) setupMediaRecorder(outgoingStream);
 
         // Notify others
         socketRef.current?.emit('camera-state-changed', {
@@ -1429,6 +1794,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   };
 
   const toggleMute = () => {
+    if (!isBroadcastPresenterRef.current) return;
+
     const newMutedState = !isMuted;
     setIsMuted(newMutedState);
     isMutedRef.current = newMutedState;
@@ -1465,6 +1832,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const leaveRoom = () => {
     console.log('Client: Leaving room');
+    stopSubtitleAudioStreaming();
+    socketRef.current?.emit('subtitle-stt-stop', { roomId });
     mediaRecorderRef.current?.stop();
     localStreamRef.current?.getTracks().forEach(track => track.stop());
 
@@ -1552,6 +1921,36 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const handleSendReaction = (emoji: string) => {
     socketRef.current?.emit('send-reaction', { roomId, emoji });
+    setShowControls(true);
+    if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+  };
+
+  const setBroadcastPresenter = (targetUserId: string) => {
+    if (!isHost || !socketRef.current?.connected) return;
+
+    socketRef.current.emit('set-broadcast-presenter', {
+      roomId,
+      targetUserId,
+    });
+  };
+
+  const setRoomBroadcastMode = (mode: BroadcastMode) => {
+    if (!isHost || !socketRef.current?.connected) return;
+    socketRef.current.emit('set-broadcast-mode', {
+      roomId,
+      mode,
+    });
+  };
+
+  const revokeBroadcastPresenter = (targetUserId: string) => {
+    if (!isHost || !socketRef.current?.connected || targetUserId === currentUserId) return;
+    setBroadcastPresenter(currentUserId);
+  };
+
+  const stopControlsClickThrough = (event: SyntheticEvent) => {
+    event.stopPropagation();
+    setShowControls(true);
+    if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
   };
 
   // Auto-hide controls logic
@@ -1664,23 +2063,66 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         };
         el.addEventListener('error', errorHandler, { once: true });
 
-        el.play().then(() => {
-          console.log(`[VideoRef] Autoplay started for ${userId}`);
-        }).catch(e => {
-          if (e.name !== 'AbortError') {
-            console.error(`[VideoRef] Autoplay failed for ${userId}`, e);
-          }
-        });
+        playRemoteVideo(el, userId);
       } else {
-        console.warn(`[VideoRef] No MediaSource found for ${userId} (socketId: ${socketId})`);
+        if (socketId && chunkQueueRef.current[socketId]?.length > 0) {
+          setupMediaSource(userId, socketId, remoteMimeTypesRef.current[socketId]);
+        } else {
+          console.warn(`[VideoRef] No MediaSource found for ${userId} (socketId: ${socketId})`);
+        }
       }
     }
   }, [selectedAudioOutputDeviceId]);
 
   // --- Render Logic ---
-  const localParticipant = { userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn, isLocal: true };
+  const localParticipant = { userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn, isLocal: true, canBroadcast: isBroadcastPresenter };
   const pinnedParticipant = participants.find(p => p.userId === pinnedUserId) || (pinnedUserId === currentUserId ? localParticipant : null);
   const mainSpeaker = pinnedParticipant || participants[0] || localParticipant; // Default to first remote user, or Me if alone
+  const shouldShowSubtitles = subtitles.length > 0 && (isSubtitlesEnabled || !isBroadcastPresenter);
+  const selectedSubtitleLangs = new Set(subtitleLangs);
+
+  const getParticipantReactions = (userId: string) => reactions.filter(reaction => reaction.userId === userId);
+  const getSpeakerAction = (participant: Participant) => {
+    if (!isHost || broadcastMode === 'all') return undefined;
+    if (participant.userId === currentUserId) return isBroadcastPresenter ? undefined : 'make' as const;
+    return participant.canBroadcast ? 'revoke' as const : 'make' as const;
+  };
+  const getSpeakerActionLabel = (participant: Participant) => {
+    const action = getSpeakerAction(participant);
+    if (!action) return undefined;
+    if (participant.userId === currentUserId) return '내가 화자 되기';
+    return action === 'revoke' ? '화자 권한 뺐기' : '화자 권한 주기';
+  };
+  const handleSpeakerAction = (targetUserId: string) => {
+    const isCurrentPresenter = targetUserId === currentUserId
+      ? isBroadcastPresenter
+      : participants.some(participant => participant.userId === targetUserId && participant.canBroadcast);
+
+    if (isCurrentPresenter && targetUserId !== currentUserId) {
+      revokeBroadcastPresenter(targetUserId);
+      return;
+    }
+
+    setBroadcastPresenter(targetUserId);
+  };
+  const formatSubtitleTime = (timestamp?: number) => {
+    if (!timestamp) return '-';
+    return new Date(timestamp).toLocaleTimeString('ko-KR', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      fractionalSecondDigits: 3,
+    });
+  };
+  const toggleSubtitleLang = (lang: SubtitleLang) => {
+    setSubtitleLangs(prev => {
+      if (prev.includes(lang)) {
+        return prev.length === 1 ? prev : prev.filter(item => item !== lang);
+      }
+      return [...prev, lang];
+    });
+  };
 
   return (
     <div
@@ -1810,6 +2252,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                         isPinned={pinnedUserId === p.userId}
                         onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
                         isSpeaking={speakingParticipants.has(p.userId)}
+                        reactions={getParticipantReactions(p.userId)}
+                        speakerAction={getSpeakerAction(p)}
+                        speakerActionLabel={getSpeakerActionLabel(p)}
+                        onSpeakerAction={handleSpeakerAction}
                         className="w-full h-full border border-white/10 rounded-xl md:rounded-2xl bg-black/40 overflow-hidden shadow-lg"
                       />
                     </div>
@@ -1830,6 +2276,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     isPinned={pinnedUserId === mainSpeaker.userId}
                     onPin={() => setPinnedUserId(pinnedUserId === mainSpeaker.userId ? null : mainSpeaker.userId)}
                     isSpeaking={speakingParticipants.has(mainSpeaker.userId)}
+                    reactions={getParticipantReactions(mainSpeaker.userId)}
+                    speakerAction={getSpeakerAction(mainSpeaker)}
+                    speakerActionLabel={getSpeakerActionLabel(mainSpeaker)}
+                    onSpeakerAction={handleSpeakerAction}
                     className="w-full h-full"
                   />
                 </div>
@@ -1849,6 +2299,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           isPinned={pinnedUserId === p.userId}
                           onPin={() => setPinnedUserId(pinnedUserId === p.userId ? null : p.userId)}
                           isSpeaking={speakingParticipants.has(p.userId)}
+                          reactions={getParticipantReactions(p.userId)}
+                          speakerAction={getSpeakerAction(p)}
+                          speakerActionLabel={getSpeakerActionLabel(p)}
+                          onSpeakerAction={handleSpeakerAction}
                           className="w-full h-full border-2 border-transparent hover:border-primary/50 transition-all"
                         />
                       </div>
@@ -1858,11 +2312,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             )}
           </div>
 
-          {/* Reaction Overlay */}
-          <ReactionOverlay reactions={reactions} />
-
           {/* Subtitles Overlay (Netflix Style) */}
-          {isSubtitlesEnabled && subtitles.length > 0 && (
+          {shouldShowSubtitles && (
             <div className="absolute bottom-32 left-0 right-0 z-40 flex flex-col items-center justify-end pointer-events-none px-4 gap-2">
               {subtitles.map((sub) => (
                 <div key={sub.id} className="bg-black/70 backdrop-blur-sm px-4 py-2 rounded-lg max-w-3xl w-full text-center shadow-2xl animate-in slide-in-from-bottom-2 fade-in duration-300">
@@ -1871,21 +2322,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     <span className="text-xs text-blue-300 font-bold opacity-90">{sub.userName}</span>
                     {sub.latencyMs && (
                       <span className="text-[10px] bg-green-500/20 text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded-full font-mono font-bold">
-                        ⚡ {sub.latencyMs}ms
+                        {sub.latencyMs}ms
                       </span>
                     )}
                   </div>
+                  <div className="mb-1 flex items-center justify-center gap-2 text-[10px] font-mono text-white/60">
+                    <span>시작 {formatSubtitleTime(sub.translationStartedAt)}</span>
+                    <span>종료 {formatSubtitleTime(sub.translationFinishedAt)}</span>
+                  </div>
                   <div className="flex flex-col gap-1">
-                    {(subtitleLang === 'all' || subtitleLang === 'ko') && (
+                    {selectedSubtitleLangs.has('ko') && (
                       <p className="text-white font-medium text-sm md:text-base leading-snug drop-shadow-md">🇰🇷 {sub.ko}</p>
                     )}
-                    {(subtitleLang === 'all' || subtitleLang === 'en') && (
+                    {selectedSubtitleLangs.has('en') && (
                       <p className="text-yellow-400 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇺🇸 {sub.en}</p>
                     )}
-                    {(subtitleLang === 'all' || subtitleLang === 'ja') && (
+                    {selectedSubtitleLangs.has('ja') && (
                       <p className="text-green-300 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇯🇵 {sub.ja}</p>
                     )}
-                    {(subtitleLang === 'all' || subtitleLang === 'zh') && (
+                    {selectedSubtitleLangs.has('zh') && (
                       <p className="text-pink-300 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇨🇳 {sub.zh}</p>
                     )}
                   </div>
@@ -1898,21 +2353,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           <div className={cn(
             "absolute bottom-24 left-1/2 transform -translate-x-1/2 z-30 transition-opacity duration-300",
             showControls ? "opacity-100" : "opacity-0 pointer-events-none"
-          )}>
+          )}
+            onMouseEnter={handleControlsMouseEnter}
+            onMouseLeave={handleControlsMouseLeave}
+            onClick={stopControlsClickThrough}
+            onClickCapture={stopControlsClickThrough}
+            onMouseDown={stopControlsClickThrough}
+            onMouseDownCapture={stopControlsClickThrough}
+            onPointerDown={stopControlsClickThrough}
+            onPointerDownCapture={stopControlsClickThrough}
+          >
             <ReactionBar onReaction={(emoji) => {
-              if (socketRef.current) {
-                socketRef.current.emit('reaction', { roomId, emoji });
-                // Optimistic update
-                const newReaction: Reaction = {
-                  id: Math.random().toString(36).substr(2, 9),
-                  emoji,
-                  userId: currentUserId
-                };
-                setReactions(prev => [...prev, newReaction]);
-                setTimeout(() => {
-                  setReactions(prev => prev.filter(r => r.id !== newReaction.id));
-                }, 2000);
-              }
+              handleSendReaction(emoji);
             }} />
           </div>
 
@@ -1936,36 +2388,45 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 variant="ghost"
                 className={cn(
                   "flex flex-col items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-xl hover:bg-white/10 text-white transition-all",
-                  isMuted && "text-red-500 hover:bg-red-500/10 hover:text-red-400"
+                  isMuted && "text-red-500 hover:bg-red-500/10 hover:text-red-400",
+                  !isBroadcastPresenter && "opacity-45 cursor-not-allowed hover:bg-transparent"
                 )}
+                disabled={!isBroadcastPresenter}
                 onClick={toggleMute}
+                title={isBroadcastPresenter ? undefined : "Receive-only attendee"}
               >
                 {isMuted ? <MicOff className="w-5 h-5 md:w-6 md:h-6 mb-1" /> : <Mic className="w-5 h-5 md:w-6 md:h-6 mb-1" />}
-                <span className="text-[10px] md:text-xs font-medium">{isMuted ? 'Unmute' : 'Mute'}</span>
+                <span className="text-[10px] md:text-xs font-medium">{isBroadcastPresenter ? (isMuted ? 'Unmute' : 'Mute') : 'Listen'}</span>
               </Button>
 
               <Button
                 variant="ghost"
                 className={cn(
                   "flex flex-col items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-xl hover:bg-white/10 text-white transition-all",
-                  !localVideoOn && "text-red-500 hover:bg-red-500/10 hover:text-red-400"
+                  !localVideoOn && "text-red-500 hover:bg-red-500/10 hover:text-red-400",
+                  !isBroadcastPresenter && "opacity-45 cursor-not-allowed hover:bg-transparent"
                 )}
+                disabled={!isBroadcastPresenter}
                 onClick={toggleCamera}
+                title={isBroadcastPresenter ? undefined : "Receive-only attendee"}
               >
                 {localVideoOn ? <Video className="w-5 h-5 md:w-6 md:h-6 mb-1" /> : <VideoOff className="w-5 h-5 md:w-6 md:h-6 mb-1" />}
-                <span className="text-[10px] md:text-xs font-medium">{localVideoOn ? 'Stop Video' : 'Start Video'}</span>
+                <span className="text-[10px] md:text-xs font-medium">{isBroadcastPresenter ? (localVideoOn ? 'Stop Video' : 'Start Video') : 'View'}</span>
               </Button>
 
               <Button
                 variant="ghost"
                 className={cn(
                   "flex flex-col items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-xl hover:bg-white/10 text-white transition-all",
-                  isScreenSharing && "text-blue-400 bg-white/10"
+                  isScreenSharing && "text-blue-400 bg-white/10",
+                  !isBroadcastPresenter && "opacity-45 cursor-not-allowed hover:bg-transparent"
                 )}
+                disabled={!isBroadcastPresenter}
                 onClick={toggleScreenShare}
+                title={isBroadcastPresenter ? undefined : "Receive-only attendee"}
               >
                 <MonitorUp className="w-5 h-5 md:w-6 md:h-6 mb-1" />
-                <span className="text-[10px] md:text-xs font-medium">{isScreenSharing ? 'Stop Share' : 'Screen Share'}</span>
+                <span className="text-[10px] md:text-xs font-medium">{isBroadcastPresenter ? (isScreenSharing ? 'Stop Share' : 'Screen Share') : 'Receive'}</span>
               </Button>
 
               <div className="relative group">
@@ -1986,18 +2447,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-black/90 backdrop-blur-md rounded-lg p-3 flex flex-col gap-3 border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-50 shadow-xl">
                     {/* View Language */}
                     <div className="flex flex-col gap-1">
-                      <span className="text-[10px] text-gray-400 font-bold px-1 mb-0.5">표시할 자막 (Display)</span>
-                      <div className="flex gap-1">
-                        {['all', 'ko', 'en', 'ja', 'zh'].map((lang) => (
+                      <span className="text-[10px] text-gray-400 font-bold px-1 mb-0.5">번역 자막 선택</span>
+                      <div className="grid grid-cols-4 gap-1">
+                        {(['ko', 'en', 'ja', 'zh'] as SubtitleLang[]).map((lang) => (
                           <button
                             key={'view-' + lang}
                             className={cn(
                               "text-xs px-2.5 py-1 rounded hover:bg-white/20 transition-colors uppercase font-bold text-center flex-1",
-                              subtitleLang === lang ? "bg-primary text-white" : "text-gray-300 bg-white/5"
+                              subtitleLangs.includes(lang) ? "bg-primary text-white" : "text-gray-300 bg-white/5"
                             )}
-                            onClick={(e) => { e.stopPropagation(); setSubtitleLang(lang as SubtitleLang); }}
+                            onClick={(e) => { e.stopPropagation(); toggleSubtitleLang(lang); }}
                           >
-                            {lang === 'all' ? 'All' : lang}
+                            {lang}
                           </button>
                         ))}
                       </div>
@@ -2117,43 +2578,76 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         {
           showParticipantsPanel && (
             <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowParticipantsPanel(false)}>
-              <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-xl font-bold">Participants ({participants.length + 1})</h3>
-                  <Button variant="ghost" size="sm" onClick={() => setShowParticipantsPanel(false)}>Close</Button>
+              <div className="bg-card p-5 rounded-lg shadow-2xl w-full max-w-lg m-4 border max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                <div className="flex justify-between items-start gap-4 mb-4">
+                  <div>
+                    <h3 className="text-lg font-bold">참가자</h3>
+                    <p className="text-xs text-muted-foreground mt-0.5">{participants.length + 1}명 참여 중</p>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => setShowParticipantsPanel(false)}>닫기</Button>
                 </div>
 
                 <div className="overflow-y-auto flex-1 space-y-2">
                   {/* Local User */}
-                  <div className="flex items-center justify-between p-2 rounded-lg bg-secondary/50">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
+                  <div className="flex items-center justify-between gap-3 p-3 rounded-md bg-secondary/50 border">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold shrink-0">
                         {session?.user?.name?.[0]?.toUpperCase() || 'ME'}
                       </div>
-                      <span className="font-medium">{session?.user?.name || 'Me'} (You)</span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-medium truncate">{session?.user?.name || 'Me'} (나)</span>
+                          {hostId === currentUserId && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300">방장</span>}
+                          {isBroadcastPresenter && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-300">화자</span>}
+                        </div>
+                        <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                          {isMuted ? <MicOff className="w-3.5 h-3.5 text-red-500" /> : <Mic className="w-3.5 h-3.5 text-green-500" />}
+                          {localVideoOn ? <Video className="w-3.5 h-3.5 text-green-500" /> : <VideoOff className="w-3.5 h-3.5 text-red-500" />}
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex gap-2">
-                      {isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
-                      {localVideoOn ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isHost && broadcastMode === 'single' && !isBroadcastPresenter && (
+                        <Button size="sm" variant="secondary" onClick={() => setBroadcastPresenter(currentUserId)}>
+                          내가 화자 되기
+                        </Button>
+                      )}
                     </div>
                   </div>
 
                   {/* Remote Users */}
                   {participants.map(p => (
-                    <div key={p.userId} className="flex items-center justify-between p-2 rounded-lg hover:bg-secondary/30">
-                      <div className="flex items-center gap-3">
+                    <div key={p.userId} className="flex items-center justify-between gap-3 p-3 rounded-md border hover:bg-secondary/30">
+                      <div className="flex items-center gap-3 min-w-0">
                         {p.avatar_url ? (
-                          <Image src={p.avatar_url} alt={p.username} width={32} height={32} className="rounded-full object-cover" />
+                          <Image src={p.avatar_url} alt={p.username} width={36} height={36} className="rounded-full object-cover shrink-0" />
                         ) : (
-                          <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold">
+                          <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold shrink-0">
                             {p.username?.[0]?.toUpperCase()}
                           </div>
                         )}
-                        <span className="font-medium">{p.username}</span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-medium truncate">{p.username}</span>
+                            {hostId === p.userId && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300">방장</span>}
+                            {p.canBroadcast && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-300">화자</span>}
+                          </div>
+                          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                            {p.isMuted ? <MicOff className="w-3.5 h-3.5 text-red-500" /> : <Mic className="w-3.5 h-3.5 text-green-500" />}
+                            {p.hasVideo ? <Video className="w-3.5 h-3.5 text-green-500" /> : <VideoOff className="w-3.5 h-3.5 text-red-500" />}
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex gap-2">
-                        {p.isMuted ? <MicOff className="w-4 h-4 text-red-500" /> : <Mic className="w-4 h-4 text-green-500" />}
-                        {p.hasVideo ? <Video className="w-4 h-4 text-green-500" /> : <VideoOff className="w-4 h-4 text-red-500" />}
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isHost && broadcastMode === 'single' && (
+                          <Button
+                            size="sm"
+                            variant={p.canBroadcast ? "destructive" : "secondary"}
+                            onClick={() => p.canBroadcast ? revokeBroadcastPresenter(p.userId) : setBroadcastPresenter(p.userId)}
+                          >
+                            {p.canBroadcast ? '화자 권한 뺐기' : '화자 권한 주기'}
+                          </Button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -2174,6 +2668,43 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 </div>
 
                 <div className="space-y-4">
+                  {isHost && (
+                    <div className="rounded-lg border bg-secondary/20 p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="text-sm font-bold">화자 모드</div>
+                          <div className="text-xs text-muted-foreground mt-1">
+                            {broadcastMode === 'all'
+                              ? '모든 참가자가 영상과 음성을 송출할 수 있습니다.'
+                              : '방장이 지정한 한 명만 영상과 음성을 송출합니다.'}
+                          </div>
+                        </div>
+                        <div className="flex rounded-md bg-background/70 p-1 border shrink-0">
+                          <button
+                            type="button"
+                            className={cn(
+                              "px-3 py-1.5 text-xs font-semibold rounded transition-colors",
+                              broadcastMode === 'single' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                            )}
+                            onClick={() => setRoomBroadcastMode('single')}
+                          >
+                            단일
+                          </button>
+                          <button
+                            type="button"
+                            className={cn(
+                              "px-3 py-1.5 text-xs font-semibold rounded transition-colors",
+                              broadcastMode === 'all' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                            )}
+                            onClick={() => setRoomBroadcastMode('all')}
+                          >
+                            전체
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Camera</label>
                     <select

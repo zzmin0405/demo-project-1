@@ -15,8 +15,31 @@ interface Participant {
   username: string;
   hasVideo: boolean;
   isMuted: boolean;
+  canBroadcast?: boolean;
   avatar_url?: string;
 }
+
+interface DeepgramSubtitleSession {
+  socket: WebSocket;
+  roomId: string;
+  client: Socket;
+  sequence: number;
+  currentSpeechStartedAt?: number;
+}
+
+type SubtitleLang = 'all' | 'ko' | 'en' | 'ja' | 'zh';
+type SubtitleDisplayLang = Exclude<SubtitleLang, 'all'>;
+type BroadcastMode = 'single' | 'all';
+type TranslationMap = {
+  ko: string;
+  en: string;
+  ja: string;
+  zh: string;
+};
+type SubtitleTranslationResult = {
+  translations: TranslationMap;
+  complete: boolean;
+};
 
 @UseGuards(SupabaseAuthGuard)
 @WebSocketGateway({
@@ -31,23 +54,36 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
+  private readonly subtitleTranslateTimeoutMs = 2400;
+  private readonly subtitleCacheLimit = 300;
+  private readonly subtitleTranslationCache = new Map<string, TranslationMap>();
+  private readonly activeSubtitleSessions = new Map<string, { id: string; sequence: number }>();
+  private readonly deepgramSubtitleSessions = new Map<string, DeepgramSubtitleSession>();
+  private readonly subtitleLanguageBySocketId = new Map<string, SubtitleDisplayLang[]>();
+
   private roomToUsers = new Map<string, Map<string, Participant>>(); // roomId -> Map<socketId, Participant>
   private userIdToRoom = new Map<string, string>(); // userId -> roomId
+  private broadcastPresenterByRoom = new Map<string, string>(); // roomId -> userId
+  private broadcastModeByRoom = new Map<string, BroadcastMode>(); // roomId -> mode
 
-  constructor(private prisma: PrismaService) {
-    // Debug: Dump Server State every 10 seconds
-    setInterval(() => {
-      console.log('--- [Server State Dump] ---');
-      this.roomToUsers.forEach((users, roomId) => {
-        console.log(`Room ${roomId}: ${users.size} users`);
-        users.forEach((p, socketId) => {
-          const socket = this.server.sockets.sockets.get(socketId);
-          const authUser = socket ? socket['user']?.sub : 'N/A';
-          console.log(`  - User: ${p.username} (${p.userId}) | Socket: ${socketId} | AuthUser: ${authUser}`);
-        });
-      });
-      console.log('---------------------------');
-    }, 10000);
+  constructor(private prisma: PrismaService) { }
+
+  private getParticipantsWithSocketIds(roomId: string): (Participant & { socketId: string })[] {
+    return Array.from(this.roomToUsers.get(roomId)?.entries() || []).map(([socketId, participant]) => ({
+      ...participant,
+      socketId,
+    }));
+  }
+
+  private emitParticipantListChanged(roomId: string): void {
+    const room = this.roomToUsers.get(roomId);
+    if (!room) return;
+
+    this.server.to(roomId).emit('participant-list-changed', {
+      participants: this.getParticipantsWithSocketIds(roomId),
+      presenterUserId: this.broadcastPresenterByRoom.get(roomId),
+      broadcastMode: this.broadcastModeByRoom.get(roomId) ?? 'single',
+    });
   }
 
   handleConnection(client: Socket, ...args: any[]) {
@@ -58,16 +94,24 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   handleDisconnect(client: Socket) {
     console.log(`Client disconnected: ${client.id}`);
+    this.stopDeepgramSubtitleSession(client.id);
+    this.subtitleLanguageBySocketId.delete(client.id);
     this.leaveRoom(client);
   }
   @SubscribeMessage('media-chunk')
-  handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string } | any): void {
+  handleMediaChunk(client: Socket, payload: { chunk: any, mimeType?: string; timestamp?: number } | any): void {
     const roomId = Array.from(client.rooms).find(r => r !== client.id);
     const userId = client['user']?.sub || client.handshake.auth.token;
 
     // console.log(`[MediaChunkDebug] Received from ${client.id} (User: ${userId}) for Room ${roomId}`);
 
     if (roomId) {
+      const room = this.roomToUsers.get(roomId);
+      const participant = room?.get(client.id);
+      if (!participant?.canBroadcast) {
+        return;
+      }
+
       const chunk = payload.chunk || payload;
       const mimeType = payload.mimeType || 'video/webm; codecs="vp8, opus"';
 
@@ -75,7 +119,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         socketId: client.id,
         userId: userId, // Explicitly send userId to prevent mapping errors
         chunk: chunk,
-        mimeType: mimeType
+        mimeType: mimeType,
+        timestamp: payload.timestamp,
       });
     }
   }
@@ -191,6 +236,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
         if (users.size === 0) {
           this.roomToUsers.delete(roomId);
+          this.broadcastPresenterByRoom.delete(roomId);
+          this.broadcastModeByRoom.delete(roomId);
           console.log(`[RoomDebug] Room ${roomId} deleted (empty).`);
         }
 
@@ -223,6 +270,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         } else {
           console.log(`Client ${leavingUser.userId} socket ${client.id} disconnected, but user remains in room (refresh/ghost).`);
         }
+        this.emitParticipantListChanged(roomId);
         return;
       }
     }
@@ -307,23 +355,28 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     const room = this.roomToUsers.get(roomId)!;
 
-    // Get other users' data including their socketId
-    const otherUsers = Array.from(room.entries()).map(([socketId, participant]) => ({
-      ...participant,
-      socketId,
-    }));
-
-    // Add the new user
-    room.set(client.id, { userId, username, hasVideo, isMuted, avatar_url });
-    this.userIdToRoom.set(userId, roomId); // Track user's room
-    client.join(roomId);
-
-    // 1. Send the list of other participants (with socketIds) back to the new user.
-    // Also send meeting metadata (title, hostId)
+    // Get meeting metadata before publishing participant state so the creator is the only broadcaster.
     const roomInfo = await this.prisma.meetingRoom.findUnique({
       where: { id: roomId },
       select: { title: true, creatorId: true }
     });
+    if (roomInfo?.creatorId && !this.broadcastPresenterByRoom.has(roomId)) {
+      this.broadcastPresenterByRoom.set(roomId, roomInfo.creatorId);
+    }
+    if (!this.broadcastModeByRoom.has(roomId)) {
+      this.broadcastModeByRoom.set(roomId, 'single');
+    }
+    const broadcastMode = this.broadcastModeByRoom.get(roomId) ?? 'single';
+    const currentPresenterUserId = this.broadcastPresenterByRoom.get(roomId);
+    const canBroadcast = broadcastMode === 'all' || currentPresenterUserId === userId;
+
+    // Get other users' data including their socketId
+    const otherUsers = this.getParticipantsWithSocketIds(roomId);
+
+    // Add the new user
+    room.set(client.id, { userId, username, hasVideo: canBroadcast ? hasVideo : false, isMuted: canBroadcast ? isMuted : true, avatar_url, canBroadcast });
+    this.userIdToRoom.set(userId, roomId); // Track user's room
+    client.join(roomId);
 
     // DB Sync: Upsert Participant record
     try {
@@ -361,11 +414,14 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       roomId,
       participants: otherUsers,
       title: roomInfo?.title || 'Untitled Meeting',
-      hostId: roomInfo?.creatorId
+      hostId: roomInfo?.creatorId,
+      canBroadcast,
+      broadcastMode,
     });
 
     // 2. Notify everyone else that a new user has joined (with their socketId).
-    client.to(roomId).emit('user-joined', { userId, username, hasVideo, isMuted, avatar_url, socketId: client.id });
+    client.to(roomId).emit('user-joined', { userId, username, hasVideo: canBroadcast ? hasVideo : false, isMuted: canBroadcast ? isMuted : true, avatar_url, canBroadcast, socketId: client.id });
+    this.emitParticipantListChanged(roomId);
 
     console.log(`Client ${userId} (${username}) joined room ${roomId}.`);
   }
@@ -422,8 +478,10 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   handleCameraStateChanged(client: Socket, data: { roomId: string; userId: string; hasVideo: boolean }): void {
     // Update server state
     const room = this.roomToUsers.get(data.roomId);
+    const participant = room?.get(client.id);
+    if (!participant?.canBroadcast) return;
+
     if (room && room.has(client.id)) {
-      const participant = room.get(client.id);
       if (participant) {
         participant.hasVideo = data.hasVideo;
       }
@@ -440,8 +498,10 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   handleMicStateChanged(client: Socket, data: { roomId: string; userId: string; isMuted: boolean }): void {
     // Update server state
     const room = this.roomToUsers.get(data.roomId);
+    const participant = room?.get(client.id);
+    if (!participant?.canBroadcast) return;
+
     if (room && room.has(client.id)) {
-      const participant = room.get(client.id);
       if (participant) {
         participant.isMuted = data.isMuted;
       }
@@ -502,18 +562,138 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
+  @SubscribeMessage('set-broadcast-presenter')
+  async handleSetBroadcastPresenter(client: Socket, data: { roomId: string; targetUserId: string }): Promise<void> {
+    const requesterUserId = client['user']?.sub;
+    if (!requesterUserId || !data.targetUserId) return;
+
+    const meetingRoom = await this.prisma.meetingRoom.findUnique({
+      where: { id: data.roomId },
+      select: { creatorId: true },
+    });
+    if (!meetingRoom || meetingRoom.creatorId !== requesterUserId) {
+      client.emit('error', { message: 'Only the host can change the speaker.' });
+      return;
+    }
+
+    const room = this.roomToUsers.get(data.roomId);
+    if (!room) return;
+
+    this.broadcastModeByRoom.set(data.roomId, 'single');
+    let targetFound = false;
+    for (const [socketId, participant] of room.entries()) {
+      const shouldBroadcast = participant.userId === data.targetUserId;
+      participant.canBroadcast = shouldBroadcast;
+
+      if (shouldBroadcast) {
+        targetFound = true;
+      } else {
+        participant.hasVideo = false;
+        participant.isMuted = true;
+        this.stopDeepgramSubtitleSession(socketId);
+      }
+    }
+
+    if (!targetFound) {
+      client.emit('error', { message: 'Selected participant is not in this room.' });
+      return;
+    }
+
+    this.broadcastPresenterByRoom.set(data.roomId, data.targetUserId);
+    const participants = this.getParticipantsWithSocketIds(data.roomId);
+
+    this.server.to(data.roomId).emit('broadcast-presenter-changed', {
+      presenterUserId: data.targetUserId,
+      broadcastMode: 'single',
+      participants,
+    });
+    this.emitParticipantListChanged(data.roomId);
+
+    console.log(`[Presenter] Host ${requesterUserId} changed presenter to ${data.targetUserId} in room ${data.roomId}`);
+  }
+
+  @SubscribeMessage('set-broadcast-mode')
+  async handleSetBroadcastMode(client: Socket, data: { roomId: string; mode: BroadcastMode }): Promise<void> {
+    const requesterUserId = client['user']?.sub;
+    if (!requesterUserId || !['single', 'all'].includes(data.mode)) return;
+
+    const meetingRoom = await this.prisma.meetingRoom.findUnique({
+      where: { id: data.roomId },
+      select: { creatorId: true },
+    });
+    if (!meetingRoom || meetingRoom.creatorId !== requesterUserId) {
+      client.emit('error', { message: 'Only the host can change broadcast mode.' });
+      return;
+    }
+
+    const room = this.roomToUsers.get(data.roomId);
+    if (!room) return;
+
+    this.broadcastModeByRoom.set(data.roomId, data.mode);
+    const presenterUserId = data.mode === 'single'
+      ? (this.broadcastPresenterByRoom.get(data.roomId) ?? meetingRoom.creatorId)
+      : undefined;
+
+    if (data.mode === 'single') {
+      this.broadcastPresenterByRoom.set(data.roomId, presenterUserId ?? meetingRoom.creatorId);
+    }
+
+    for (const [socketId, participant] of room.entries()) {
+      const shouldBroadcast = data.mode === 'all' || participant.userId === presenterUserId;
+      participant.canBroadcast = shouldBroadcast;
+
+      if (!shouldBroadcast) {
+        participant.hasVideo = false;
+        participant.isMuted = true;
+        this.stopDeepgramSubtitleSession(socketId);
+      }
+    }
+
+    const participants = this.getParticipantsWithSocketIds(data.roomId);
+    this.server.to(data.roomId).emit('broadcast-mode-changed', {
+      broadcastMode: data.mode,
+      presenterUserId,
+      participants,
+    });
+    this.emitParticipantListChanged(data.roomId);
+
+    console.log(`[Presenter] Host ${requesterUserId} changed broadcast mode to ${data.mode} in room ${data.roomId}`);
+  }
+
+  @SubscribeMessage('subtitle-language-changed')
+  handleSubtitleLanguageChanged(client: Socket, data: { roomId: string; lang?: SubtitleLang; langs?: SubtitleDisplayLang[] }): void {
+    if (!this.roomToUsers.get(data.roomId)?.has(client.id)) return;
+
+    const validLanguages: SubtitleDisplayLang[] = ['ko', 'en', 'ja', 'zh'];
+    const requestedLanguages = Array.isArray(data.langs)
+      ? data.langs.filter((lang): lang is SubtitleDisplayLang => validLanguages.includes(lang))
+      : data.lang === 'all'
+        ? validLanguages
+        : data.lang && validLanguages.includes(data.lang as SubtitleDisplayLang)
+          ? [data.lang as SubtitleDisplayLang]
+          : validLanguages;
+
+    this.subtitleLanguageBySocketId.set(client.id, requestedLanguages.length > 0 ? requestedLanguages : validLanguages);
+  }
+
   @SubscribeMessage('speaking-start')
   handleSpeakingStart(client: Socket, data: { roomId: string; userId: string }): void {
+    const participant = this.roomToUsers.get(data.roomId)?.get(client.id);
+    if (!participant?.canBroadcast) return;
     client.to(data.roomId).emit('speaking-start', { userId: data.userId });
   }
 
   @SubscribeMessage('speaking-stop')
   handleSpeakingStop(client: Socket, data: { roomId: string; userId: string }): void {
+    const participant = this.roomToUsers.get(data.roomId)?.get(client.id);
+    if (!participant?.canBroadcast) return;
     client.to(data.roomId).emit('speaking-stop', { userId: data.userId });
   }
 
   @SubscribeMessage('stream-reset')
   handleStreamReset(client: Socket, data: { roomId: string; userId: string }): void {
+    const participant = this.roomToUsers.get(data.roomId)?.get(client.id);
+    if (!participant?.canBroadcast) return;
     // Broadcast stream reset to other users so they can clear their buffers
     client.to(data.roomId).emit('stream-reset', { userId: data.userId });
   }
@@ -534,10 +714,14 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('stt-recognize')
-  async handleSttRecognize(client: Socket, data: { roomId: string; text: string; clientTimestamp?: number }): Promise<void> {
+  async handleSttRecognize(client: Socket, data: { roomId: string; text: string; sourceLang?: string; clientTimestamp?: number; isFinal?: boolean; sequence?: number }): Promise<void> {
+    const serverReceivedAt = Date.now();
+    const translationStartedAt = serverReceivedAt;
     const userId = client['user']?.sub;
     if (!userId || !data.text) return;
-    const { roomId, text, clientTimestamp } = data;
+    const { roomId, text, sourceLang, clientTimestamp, isFinal = true } = data;
+    const participant = this.roomToUsers.get(roomId)?.get(client.id);
+    if (!participant?.canBroadcast) return;
 
     // Get the speaker's username
     let userName = 'Unknown';
@@ -546,51 +730,337 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       userName = room.get(client.id)!.username;
     }
 
-    // Unique ID for this subtitle session (used to track streaming updates)
-    const subtitleId = Math.random().toString(36).substr(2, 9);
+    const sessionKey = `${roomId}:${userId}`;
+    let subtitleSession = this.activeSubtitleSessions.get(sessionKey);
+    const isNewSubtitleSession = !subtitleSession;
+    if (!subtitleSession) {
+      subtitleSession = {
+        id: Math.random().toString(36).substr(2, 9),
+        sequence: 0,
+      };
+      this.activeSubtitleSessions.set(sessionKey, subtitleSession);
+    }
 
-    // Immediately show the original text as a "pending" subtitle (instant feedback)
-    this.server.to(data.roomId).emit('subtitle-stream-start', {
+    const sequence = data.sequence ?? subtitleSession.sequence + 1;
+    subtitleSession.sequence = Math.max(subtitleSession.sequence, sequence);
+    const subtitleId = subtitleSession.id;
+
+    const streamPayload = {
       id: subtitleId,
       userId,
       userName,
       originalText: text,
-      clientTimestamp, // pass through for latency calculation
-    });
+      sequence,
+      isFinal,
+      clientTimestamp,
+      serverReceivedAt,
+      translationStartedAt,
+    };
+
+    this.server.to(data.roomId).emit(isNewSubtitleSession ? 'subtitle-stream-start' : 'subtitle-stream-update', streamPayload);
 
     try {
-      // Google Translate API — fast, accurate, no hallucinations
-      const { translate } = await import('google-translate-api-x');
+      const requestedLanguages = this.getRequestedSubtitleLanguages(roomId);
+      const cacheKey = this.getSubtitleCacheKey(text, sourceLang, requestedLanguages);
+      const cachedTranslations = this.subtitleTranslationCache.get(cacheKey);
+      const translationResult = cachedTranslations
+        ? { translations: cachedTranslations, complete: true }
+        : await this.translateSubtitleText(text, requestedLanguages);
+      const translations = translationResult.translations;
 
-      // Run all 3 translations in parallel for maximum speed (~200ms total)
-      const [enResult, jaResult, zhResult] = await Promise.all([
-        translate(text, { to: 'en' }),
-        translate(text, { to: 'ja' }),
-        translate(text, { to: 'zh-CN' }),
-      ]);
+      if (!cachedTranslations && translationResult.complete) {
+        this.rememberSubtitleTranslation(cacheKey, translations);
+      } else if (!cachedTranslations) {
+        console.warn(`[Translate] Partial result was not cached for "${text}"`);
+      }
 
-      const translations = {
-        ko: text,
-        en: enResult.text,
-        ja: jaResult.text,
-        zh: zhResult.text,
-      };
+      console.log(`[Translate] ✅ (${sourceLang || 'auto'}) "${text}" → KO: "${translations.ko}" | EN: "${translations.en}" | JA: "${translations.ja}" | ZH: "${translations.zh}"`);
 
-      console.log(`[Translate] ✅ "${text}" → EN: "${translations.en}" | JA: "${translations.ja}" | ZH: "${translations.zh}"`);
+      const latestSession = this.activeSubtitleSessions.get(sessionKey);
+      if (!latestSession || latestSession.id !== subtitleId || latestSession.sequence !== sequence) {
+        return;
+      }
 
-      this.server.to(roomId).emit('subtitle-broadcast', {
+      const translationFinishedAt = Date.now();
+      this.server.to(roomId).emit(isFinal ? 'subtitle-broadcast' : 'subtitle-stream-update', {
         id: subtitleId, userId, userName,
+        originalText: text,
+        sourceLang,
+        sequence,
+        isFinal,
         ...translations,
         clientTimestamp,
+        serverReceivedAt,
+        translationStartedAt,
+        translationFinishedAt,
       });
+
+      if (isFinal) {
+        this.activeSubtitleSessions.delete(sessionKey);
+      }
 
     } catch (error) {
       console.error('[Translate] ❌ Google Translate error:', error);
-      this.server.to(roomId).emit('subtitle-broadcast', {
+      const translationFinishedAt = Date.now();
+      this.server.to(roomId).emit(isFinal ? 'subtitle-broadcast' : 'subtitle-stream-update', {
         id: subtitleId, userId, userName,
+        originalText: text,
+        sourceLang,
+        sequence,
+        isFinal,
         ko: text, en: text, ja: text, zh: text,
         clientTimestamp,
+        serverReceivedAt,
+        translationStartedAt,
+        translationFinishedAt,
       });
+
+      if (isFinal) {
+        this.activeSubtitleSessions.delete(sessionKey);
+      }
+    }
+  }
+
+  @SubscribeMessage('subtitle-stt-start')
+  handleSubtitleSttStart(client: Socket, data: { roomId: string; sourceLang?: string }): void {
+    const participant = this.roomToUsers.get(data.roomId)?.get(client.id);
+    if (!participant?.canBroadcast) {
+      client.emit('stt-provider-state', {
+        provider: 'browser',
+        enabled: false,
+        reason: 'receive-only',
+      });
+      return;
+    }
+
+    const apiKey = process.env.DEEPGRAM_API_KEY;
+    if (!apiKey) {
+      client.emit('stt-provider-state', {
+        provider: 'browser',
+        enabled: false,
+        reason: 'missing-deepgram-key',
+      });
+      return;
+    }
+
+    this.stopDeepgramSubtitleSession(client.id);
+
+    const params = new URLSearchParams({
+      model: process.env.DEEPGRAM_STT_MODEL || 'nova-3',
+      interim_results: 'true',
+      endpointing: process.env.DEEPGRAM_ENDPOINTING_MS || '300',
+      punctuate: 'true',
+      smart_format: 'true',
+    });
+    const deepgramLanguage = this.toDeepgramLanguage(data.sourceLang);
+    if (deepgramLanguage) params.set('language', deepgramLanguage);
+
+    try {
+      const deepgramSocket = new WebSocket(`wss://api.deepgram.com/v1/listen?${params.toString()}`, ['token', apiKey]);
+      const session: DeepgramSubtitleSession = {
+        socket: deepgramSocket,
+        roomId: data.roomId,
+        client,
+        sequence: 0,
+      };
+      this.deepgramSubtitleSessions.set(client.id, session);
+
+      deepgramSocket.addEventListener('open', () => {
+        client.emit('stt-provider-state', {
+          provider: 'deepgram',
+          enabled: true,
+          model: params.get('model'),
+        });
+      });
+
+      deepgramSocket.addEventListener('message', (event) => {
+        this.handleDeepgramMessage(client.id, event.data);
+      });
+
+      deepgramSocket.addEventListener('error', (error) => {
+        console.error('[Deepgram] WebSocket error:', error);
+        client.emit('stt-provider-state', {
+          provider: 'browser',
+          enabled: false,
+          reason: 'deepgram-error',
+        });
+      });
+
+      deepgramSocket.addEventListener('close', () => {
+        if (this.deepgramSubtitleSessions.get(client.id)?.socket === deepgramSocket) {
+          this.deepgramSubtitleSessions.delete(client.id);
+          client.emit('stt-provider-state', {
+            provider: 'browser',
+            enabled: false,
+            reason: 'deepgram-closed',
+          });
+        }
+      });
+    } catch (error) {
+      console.error('[Deepgram] Failed to start stream:', error);
+      client.emit('stt-provider-state', {
+        provider: 'browser',
+        enabled: false,
+        reason: 'deepgram-start-failed',
+      });
+    }
+  }
+
+  @SubscribeMessage('subtitle-stt-stop')
+  handleSubtitleSttStop(client: Socket): void {
+    this.stopDeepgramSubtitleSession(client.id);
+    client.emit('stt-provider-state', {
+      provider: 'browser',
+      enabled: false,
+      reason: 'stopped',
+    });
+  }
+
+  @SubscribeMessage('stt-audio-chunk')
+  handleSubtitleAudioChunk(client: Socket, payload: { roomId: string; chunk: any; clientTimestamp?: number }): void {
+    const session = this.deepgramSubtitleSessions.get(client.id);
+    if (!session || session.roomId !== payload.roomId) return;
+
+    const participant = this.roomToUsers.get(payload.roomId)?.get(client.id);
+    if (!participant?.canBroadcast) return;
+
+    if (!session.currentSpeechStartedAt && payload.clientTimestamp) {
+      session.currentSpeechStartedAt = payload.clientTimestamp;
+    }
+
+    if (session.socket.readyState !== WebSocket.OPEN) return;
+
+    const chunk = payload.chunk;
+    if (chunk) {
+      session.socket.send(chunk);
+    }
+  }
+
+  private handleDeepgramMessage(socketId: string, rawMessage: unknown): void {
+    const session = this.deepgramSubtitleSessions.get(socketId);
+    if (!session) return;
+
+    try {
+      const messageText = typeof rawMessage === 'string'
+        ? rawMessage
+        : Buffer.from(rawMessage as ArrayBuffer).toString('utf8');
+      const message = JSON.parse(messageText);
+      const transcript = message.channel?.alternatives?.[0]?.transcript?.trim();
+      if (!transcript) return;
+
+      session.sequence += 1;
+      const isFinal = Boolean(message.is_final || message.speech_final);
+      void this.handleSttRecognize(session.client, {
+        roomId: session.roomId,
+        text: transcript,
+        isFinal,
+        sequence: session.sequence,
+        clientTimestamp: session.currentSpeechStartedAt ?? Date.now(),
+      });
+
+      if (isFinal || message.speech_final) {
+        session.currentSpeechStartedAt = undefined;
+      }
+    } catch (error) {
+      console.error('[Deepgram] Failed to parse transcript:', error);
+    }
+  }
+
+  private stopDeepgramSubtitleSession(socketId: string): void {
+    const session = this.deepgramSubtitleSessions.get(socketId);
+    if (!session) return;
+
+    this.deepgramSubtitleSessions.delete(socketId);
+    try {
+      if (session.socket.readyState === WebSocket.OPEN) {
+        session.socket.send(JSON.stringify({ type: 'Finalize' }));
+      }
+      if (session.socket.readyState === WebSocket.OPEN || session.socket.readyState === WebSocket.CONNECTING) {
+        session.socket.close();
+      }
+    } catch (error) {
+      console.error('[Deepgram] Failed to stop stream:', error);
+    }
+  }
+
+  private toDeepgramLanguage(sourceLang?: string): string | undefined {
+    if (!sourceLang) return undefined;
+
+    const languageMap: Record<string, string> = {
+      'ko-KR': 'ko',
+      'en-US': 'en-US',
+      'ja-JP': 'ja',
+      'zh-CN': 'zh-CN',
+    };
+
+    return languageMap[sourceLang] ?? sourceLang;
+  }
+
+  private getRequestedSubtitleLanguages(roomId: string): SubtitleDisplayLang[] {
+    const room = this.roomToUsers.get(roomId);
+    if (!room) return ['ko', 'en', 'ja', 'zh'];
+
+    const requested = new Set<SubtitleDisplayLang>();
+    for (const socketId of room.keys()) {
+      const langs = this.subtitleLanguageBySocketId.get(socketId) ?? ['ko', 'en', 'ja', 'zh'];
+      langs.forEach(lang => requested.add(lang));
+    }
+
+    return requested.size > 0 ? Array.from(requested) : ['ko', 'en', 'ja', 'zh'];
+  }
+
+  private getSubtitleCacheKey(text: string, sourceLang: string | undefined, languages: SubtitleDisplayLang[]): string {
+    return `${sourceLang || 'auto'}:${[...languages].sort().join(',')}:${text.trim().toLowerCase()}`;
+  }
+
+  private rememberSubtitleTranslation(cacheKey: string, translations: TranslationMap): void {
+    if (this.subtitleTranslationCache.size >= this.subtitleCacheLimit) {
+      const oldestKey = this.subtitleTranslationCache.keys().next().value;
+      if (oldestKey) this.subtitleTranslationCache.delete(oldestKey);
+    }
+    this.subtitleTranslationCache.set(cacheKey, translations);
+  }
+
+  private async translateSubtitleText(text: string, languages: SubtitleDisplayLang[]): Promise<SubtitleTranslationResult> {
+    // Caption-only translation. Translate only languages currently requested by viewers.
+    const { translate } = await import('google-translate-api-x');
+    const translations: TranslationMap = {
+      ko: text,
+      en: text,
+      ja: text,
+      zh: text,
+    };
+    let complete = true;
+
+    await Promise.all(languages.map(async (lang) => {
+      const target = lang === 'zh' ? 'zh-CN' : lang;
+      const result = await this.translateWithDeadline(
+        () => translate(text, { to: target }).then(response => response.text),
+        text,
+        target,
+      );
+      translations[lang] = result.text;
+      if (!result.ok) complete = false;
+    }));
+
+    return { translations, complete };
+  }
+
+  private async translateWithDeadline(request: () => Promise<string>, fallbackText: string, target: string): Promise<{ text: string; ok: boolean }> {
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      const translatedText = await Promise.race([
+        request(),
+        new Promise<string>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`translation timeout after ${this.subtitleTranslateTimeoutMs}ms`)), this.subtitleTranslateTimeoutMs);
+        }),
+      ]);
+      return { text: translatedText, ok: true };
+    } catch (error) {
+      console.warn(`[Translate] ${target} failed, using original text fallback:`, error);
+      return { text: fallbackText, ok: false };
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
