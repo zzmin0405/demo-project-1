@@ -56,6 +56,7 @@ model User {
   createdRooms  MeetingRoom[] @relation("CreatedRooms")
   participations Participant[]
   chatLogs      ChatLog[]
+  sttTranscriptLogs SttTranscriptLog[]
 }
 
 model MeetingRoom {
@@ -69,9 +70,11 @@ model MeetingRoom {
   
   currentMode String   @default("FREE") // FREE, ORDERED
   isChatSaved Boolean  @default(true)   // Chat persistence setting
+  isSttSaved  Boolean  @default(false)  // STT transcript persistence setting
   
   participants Participant[]
   chatLogs     ChatLog[]
+  sttTranscriptLogs SttTranscriptLog[]
   summaries    MeetingSummary[]
 
   @@index([title])
@@ -106,6 +109,26 @@ model ChatLog {
   
   user          User        @relation(fields: [userId], references: [id])
   meetingRoom   MeetingRoom @relation(fields: [meetingRoomId], references: [id])
+}
+
+model SttTranscriptLog {
+  id            String      @id @default(cuid())
+  originalText  String      @db.Text
+  ko            String      @db.Text
+  en            String      @db.Text
+  ja            String      @db.Text
+  zh            String      @db.Text
+  sourceLang    String?     @db.VarChar(20)
+  sequence      Int?
+  capturedAt    DateTime    @default(now())
+  userId        String
+  meetingRoomId String
+
+  user          User        @relation(fields: [userId], references: [id])
+  meetingRoom   MeetingRoom @relation(fields: [meetingRoomId], references: [id], onDelete: Cascade)
+
+  @@index([meetingRoomId, capturedAt])
+  @@index([userId])
 }
 
 model MeetingSummary {

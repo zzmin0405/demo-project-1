@@ -19,6 +19,7 @@ export class MeetingsController {
             await Promise.all([
                 this.prisma.participant.deleteMany({ where: { meetingRoomId: id } }),
                 this.prisma.chatLog.deleteMany({ where: { meetingRoomId: id } }),
+                this.prisma.sttTranscriptLog.deleteMany({ where: { meetingRoomId: id } }),
                 this.prisma.meetingSummary.deleteMany({ where: { meetingRoomId: id } }),
             ]);
 

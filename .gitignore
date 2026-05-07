@@ -8,10 +8,13 @@
 # Build outputs
 /dist
 /.next
+/.next_old
 /.output
 /.vercel
 /ai-meet/apps/api/dist
 /ai-meet/apps/web/.next
+/ai-meet/apps/web/.next_old
+*.tsbuildinfo
 
 
 # Logs
@@ -29,3 +32,8 @@ pnpm-debug.log*
 # Env files
 .env
 .env*.local
+
+# Local tunnel binaries and generated artifacts
+cloudflared.exe
+/ai-meet/cloudflared.exe
+/artifacts

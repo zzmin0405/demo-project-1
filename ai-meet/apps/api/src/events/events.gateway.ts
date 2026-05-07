@@ -65,6 +65,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private userIdToRoom = new Map<string, string>(); // userId -> roomId
   private broadcastPresenterByRoom = new Map<string, string>(); // roomId -> userId
   private broadcastModeByRoom = new Map<string, BroadcastMode>(); // roomId -> mode
+  private sttSavingByRoom = new Map<string, boolean>(); // roomId -> STT transcript saving enabled
 
   constructor(private prisma: PrismaService) { }
 
@@ -238,6 +239,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
           this.roomToUsers.delete(roomId);
           this.broadcastPresenterByRoom.delete(roomId);
           this.broadcastModeByRoom.delete(roomId);
+          this.sttSavingByRoom.delete(roomId);
           console.log(`[RoomDebug] Room ${roomId} deleted (empty).`);
         }
 
@@ -358,7 +360,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Get meeting metadata before publishing participant state so the creator is the only broadcaster.
     const roomInfo = await this.prisma.meetingRoom.findUnique({
       where: { id: roomId },
-      select: { title: true, creatorId: true }
+      select: { title: true, creatorId: true, isSttSaved: true }
     });
     if (roomInfo?.creatorId && !this.broadcastPresenterByRoom.has(roomId)) {
       this.broadcastPresenterByRoom.set(roomId, roomInfo.creatorId);
@@ -366,7 +368,11 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!this.broadcastModeByRoom.has(roomId)) {
       this.broadcastModeByRoom.set(roomId, 'single');
     }
+    if (roomInfo && !this.sttSavingByRoom.has(roomId)) {
+      this.sttSavingByRoom.set(roomId, roomInfo.isSttSaved);
+    }
     const broadcastMode = this.broadcastModeByRoom.get(roomId) ?? 'single';
+    const isSttSaved = this.sttSavingByRoom.get(roomId) ?? roomInfo?.isSttSaved ?? false;
     const currentPresenterUserId = this.broadcastPresenterByRoom.get(roomId);
     const canBroadcast = broadcastMode === 'all' || currentPresenterUserId === userId;
 
@@ -417,6 +423,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       hostId: roomInfo?.creatorId,
       canBroadcast,
       broadcastMode,
+      isSttSaved,
     });
 
     // 2. Notify everyone else that a new user has joined (with their socketId).
@@ -660,6 +667,31 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     console.log(`[Presenter] Host ${requesterUserId} changed broadcast mode to ${data.mode} in room ${data.roomId}`);
   }
 
+  @SubscribeMessage('set-stt-saving')
+  async handleSetSttSaving(client: Socket, data: { roomId: string; enabled: boolean }): Promise<void> {
+    const requesterUserId = client['user']?.sub;
+    if (!requesterUserId) return;
+
+    const meetingRoom = await this.prisma.meetingRoom.findUnique({
+      where: { id: data.roomId },
+      select: { creatorId: true },
+    });
+    if (!meetingRoom || meetingRoom.creatorId !== requesterUserId) {
+      client.emit('error', { message: 'Only the host can change STT recording.' });
+      return;
+    }
+
+    const enabled = Boolean(data.enabled);
+    await this.prisma.meetingRoom.update({
+      where: { id: data.roomId },
+      data: { isSttSaved: enabled },
+    });
+
+    this.sttSavingByRoom.set(data.roomId, enabled);
+    this.server.to(data.roomId).emit('stt-saving-changed', { enabled });
+    console.log(`[STT] Transcript saving ${enabled ? 'enabled' : 'disabled'} for room ${data.roomId}`);
+  }
+
   @SubscribeMessage('subtitle-language-changed')
   handleSubtitleLanguageChanged(client: Socket, data: { roomId: string; lang?: SubtitleLang; langs?: SubtitleDisplayLang[] }): void {
     if (!this.roomToUsers.get(data.roomId)?.has(client.id)) return;
@@ -782,7 +814,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
 
       const translationFinishedAt = Date.now();
-      this.server.to(roomId).emit(isFinal ? 'subtitle-broadcast' : 'subtitle-stream-update', {
+      const broadcastPayload = {
         id: subtitleId, userId, userName,
         originalText: text,
         sourceLang,
@@ -793,29 +825,43 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         serverReceivedAt,
         translationStartedAt,
         translationFinishedAt,
+      };
+      this.server.to(roomId).emit(isFinal ? 'subtitle-broadcast' : 'subtitle-stream-update', {
+        ...broadcastPayload,
       });
 
       if (isFinal) {
+        void this.saveSttTranscriptIfEnabled(roomId, userId, broadcastPayload);
         this.activeSubtitleSessions.delete(sessionKey);
       }
 
     } catch (error) {
       console.error('[Translate] ❌ Google Translate error:', error);
       const translationFinishedAt = Date.now();
-      this.server.to(roomId).emit(isFinal ? 'subtitle-broadcast' : 'subtitle-stream-update', {
+      const fallbackTranslations: TranslationMap = {
+        ko: text,
+        en: text,
+        ja: text,
+        zh: text,
+      };
+      const broadcastPayload = {
         id: subtitleId, userId, userName,
         originalText: text,
         sourceLang,
         sequence,
         isFinal,
-        ko: text, en: text, ja: text, zh: text,
+        ...fallbackTranslations,
         clientTimestamp,
         serverReceivedAt,
         translationStartedAt,
         translationFinishedAt,
+      };
+      this.server.to(roomId).emit(isFinal ? 'subtitle-broadcast' : 'subtitle-stream-update', {
+        ...broadcastPayload,
       });
 
       if (isFinal) {
+        void this.saveSttTranscriptIfEnabled(roomId, userId, broadcastPayload);
         this.activeSubtitleSessions.delete(sessionKey);
       }
     }
@@ -1019,6 +1065,50 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (oldestKey) this.subtitleTranslationCache.delete(oldestKey);
     }
     this.subtitleTranslationCache.set(cacheKey, translations);
+  }
+
+  private async saveSttTranscriptIfEnabled(
+    roomId: string,
+    userId: string,
+    payload: {
+      originalText?: string;
+      ko: string;
+      en: string;
+      ja: string;
+      zh: string;
+      sourceLang?: string;
+      sequence?: number;
+    },
+  ): Promise<void> {
+    try {
+      let isSttSaved = this.sttSavingByRoom.get(roomId);
+      if (typeof isSttSaved !== 'boolean') {
+        const meetingRoom = await this.prisma.meetingRoom.findUnique({
+          where: { id: roomId },
+          select: { isSttSaved: true },
+        });
+        isSttSaved = meetingRoom?.isSttSaved ?? false;
+        this.sttSavingByRoom.set(roomId, isSttSaved);
+      }
+
+      if (!isSttSaved) return;
+
+      await this.prisma.sttTranscriptLog.create({
+        data: {
+          originalText: payload.originalText || payload.ko,
+          ko: payload.ko,
+          en: payload.en,
+          ja: payload.ja,
+          zh: payload.zh,
+          sourceLang: payload.sourceLang,
+          sequence: payload.sequence,
+          userId,
+          meetingRoomId: roomId,
+        },
+      });
+    } catch (error) {
+      console.error('[STT] Failed to save transcript log:', error);
+    }
   }
 
   private async translateSubtitleText(text: string, languages: SubtitleDisplayLang[]): Promise<SubtitleTranslationResult> {

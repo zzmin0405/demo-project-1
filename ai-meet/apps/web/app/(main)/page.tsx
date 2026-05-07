@@ -36,7 +36,8 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: settings.title,
-          isChatSaved: settings.isChatSaved
+          isChatSaved: settings.isChatSaved,
+          isSttSaved: settings.isSttSaved,
         })
       });
 

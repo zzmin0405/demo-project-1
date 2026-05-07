@@ -14,9 +14,12 @@ const eslintConfig = [
     ignores: [
       "**/node_modules/**",
       "**/.next/**",
+      "**/.next_old/**",
       "**/out/**",
       "**/build/**",
       "**/next-env.d.ts",
+      "**/*.tsbuildinfo",
+      "prisma/seed.js",
     ],
   },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
@@ -26,6 +29,10 @@ const eslintConfig = [
       "@typescript-eslint/no-unused-vars": "off",
       "@typescript-eslint/ban-ts-comment": "off",
       "react-hooks/exhaustive-deps": "off",
+      "react-hooks/immutability": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/refs": "off",
+      "react-hooks/set-state-in-effect": "off",
     },
   },
 ];

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
-import { Video, Mic, MessageSquare, Settings2 } from "lucide-react"
+import { Video, Mic, MessageSquare, Settings2, Subtitles } from "lucide-react"
 import { useLanguage } from "@/contexts/language-context"
 
 interface CreateMeetingModalProps {
@@ -19,6 +19,7 @@ interface CreateMeetingModalProps {
 export interface MeetingSettings {
     title: string
     isChatSaved: boolean
+    isSttSaved: boolean
     joinMuted: boolean
     joinVideoOff: boolean
 }
@@ -26,6 +27,7 @@ export interface MeetingSettings {
 export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: CreateMeetingModalProps) {
     const [title, setTitle] = useState("")
     const [isChatSaved, setIsChatSaved] = useState(true)
+    const [isSttSaved, setIsSttSaved] = useState(false)
     const [joinMuted, setJoinMuted] = useState(false)
     const [joinVideoOff, setJoinVideoOff] = useState(false)
     const { dict } = useLanguage();
@@ -34,6 +36,7 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
         onCreate({
             title: title.trim() || "Untitled Meeting",
             isChatSaved,
+            isSttSaved,
             joinMuted,
             joinVideoOff
         })
@@ -81,6 +84,18 @@ export function CreateMeetingModal({ isOpen, onClose, onCreate, isLoading }: Cre
                                     </p>
                                 </div>
                                 <Switch checked={isChatSaved} onCheckedChange={setIsChatSaved} className="scale-75 sm:scale-100" />
+                            </div>
+
+                            <div className="flex items-center justify-between gap-3 sm:gap-8">
+                                <div className="space-y-1">
+                                    <Label className="text-sm sm:text-lg flex items-center gap-2 sm:gap-3">
+                                        <Subtitles className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400" /> STT 기록 저장
+                                    </Label>
+                                    <p className="text-[10px] sm:text-sm text-muted-foreground hidden sm:block">
+                                        회의 중 확정된 자막 내용을 데이터베이스에 저장합니다.
+                                    </p>
+                                </div>
+                                <Switch checked={isSttSaved} onCheckedChange={setIsSttSaved} className="scale-75 sm:scale-100" />
                             </div>
 
                             <div className="flex items-center justify-between gap-3 sm:gap-8">

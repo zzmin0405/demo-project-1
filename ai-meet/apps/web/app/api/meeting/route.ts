@@ -12,9 +12,9 @@ export async function POST(req: Request) {
         }
 
         const body = await req.json();
-        const { title, isChatSaved } = body;
+        const { title, isChatSaved, isSttSaved } = body;
 
-        let user = await prisma.user.findUnique({
+        const user = await prisma.user.findUnique({
             where: { email: session.user.email },
         });
 
@@ -27,6 +27,7 @@ export async function POST(req: Request) {
                 title: title || 'Untitled Meeting',
                 creatorId: user.id,
                 isChatSaved: isChatSaved ?? true,
+                isSttSaved: isSttSaved ?? false,
             },
         });
 
