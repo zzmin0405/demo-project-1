@@ -9,7 +9,8 @@ import { Button } from "@/components/ui/button";
 import {
   Mic, MicOff, Video, VideoOff, MonitorUp, PhoneOff,
   MoreHorizontal, LayoutGrid, Maximize, Pin, PinOff,
-  Users, MessageSquare, Settings, X, Send, ChevronUp, ChevronDown, Edit2, Trash2, Subtitles, Languages
+  Users, MessageSquare, Settings, X, Send, ChevronUp, ChevronDown, Edit2, Trash2, Subtitles, Languages,
+  Radio, Crown, Check, Copy, Clock3, Activity, Volume2
 } from 'lucide-react';
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -79,6 +80,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const sttLangRef = useRef('');
   const [sttProvider, setSttProvider] = useState<SttProvider>('browser');
   const sttProviderRef = useRef<SttProvider>('browser');
+  const [isSttSaved, setIsSttSaved] = useState(false);
+  const [isSttSavingUpdating, setIsSttSavingUpdating] = useState(false);
   const [subtitles, setSubtitles] = useState<SubtitleData[]>([]);
   const recognitionRef = useRef<any>(null);
   
@@ -142,19 +145,40 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const pendingMediaChunksRef = useRef<{ chunk: Blob; mimeType: string; timestamp: number }[]>([]);
   const remoteMimeTypesRef = useRef<{ [socketId: string]: string }>({});
   const mediaSourceUrlsRef = useRef<{ [socketId: string]: string }>({}); // Track created Object URLs
+  const remoteLatencyIntervalsRef = useRef<{ [socketId: string]: NodeJS.Timeout }>({});
   const remoteVideosAwaitingUserGestureRef = useRef<Set<HTMLVideoElement>>(new Set());
   const hasUserInteractedRef = useRef(false);
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
+  const [systemNotice, setSystemNotice] = useState('');
+  const systemNoticeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [showEndCallModal, setShowEndCallModal] = useState(false);
   const [showMorePanel, setShowMorePanel] = useState(false);
   const [exitImmediately, setExitImmediately] = useState(false);
+  const [deleteRoomOnHostEnd, setDeleteRoomOnHostEnd] = useState(true);
+  const [isEndingMeeting, setIsEndingMeeting] = useState(false);
 
   // Speaking Indicator State
   const [speakingParticipants, setSpeakingParticipants] = useState<Set<string>>(new Set());
   const analyserNodeRef = useRef<AnalyserNode | null>(null);
   const speakingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isSpeakingRef = useRef<boolean>(false);
+
+  const closeAudioContext = useCallback(() => {
+    const audioContext = audioContextRef.current;
+    audioContextRef.current = null;
+    gainNodeRef.current = null;
+    audioSourceRef.current = null;
+    audioDestinationRef.current = null;
+    analyserNodeRef.current = null;
+
+    if (!audioContext || audioContext.state === 'closed') return;
+    audioContext.close().catch(error => {
+      if (error?.name !== 'InvalidStateError') {
+        console.warn('[AudioContext] Failed to close:', error);
+      }
+    });
+  }, []);
 
   // Load initial settings from sessionStorage
   useEffect(() => {
@@ -195,6 +219,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   useEffect(() => {
     const savedSetting = localStorage.getItem('exitImmediately') === 'true';
     setExitImmediately(savedSetting);
+    const savedDeleteRoomSetting = localStorage.getItem('deleteRoomOnHostEnd');
+    setDeleteRoomOnHostEnd(savedDeleteRoomSetting === null ? true : savedDeleteRoomSetting === 'true');
   }, []);
 
   useEffect(() => {
@@ -568,13 +594,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         // Media capture starts after room-state confirms this socket is the presenter.
       });
 
-      socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string, canBroadcast?: boolean; broadcastMode?: BroadcastMode }) => {
+      socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string, canBroadcast?: boolean; broadcastMode?: BroadcastMode; isSttSaved?: boolean }) => {
         console.log('Client: room-state received', data);
         const canBroadcast = Boolean(data.canBroadcast);
 
         if (data.title) setMeetingTitle(data.title);
         if (data.hostId) setHostId(data.hostId);
         if (data.broadcastMode) setBroadcastMode(data.broadcastMode);
+        if (typeof data.isSttSaved === 'boolean') setIsSttSaved(data.isSttSaved);
         setIsHost(Boolean(data.hostId && data.hostId === currentUserId));
 
         syncRemoteParticipants(data.participants);
@@ -649,6 +676,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         syncRemoteParticipants(data.participants);
         const currentParticipant = data.participants.find(p => p.userId === currentUserId);
         applyBroadcastPresenterState(Boolean(currentParticipant?.canBroadcast));
+      });
+
+      socket.on('stt-saving-changed', (data: { enabled: boolean }) => {
+        setIsSttSaved(data.enabled);
+        setIsSttSavingUpdating(false);
+        showSystemNotice(data.enabled ? 'STT 기록을 시작했습니다.' : 'STT 기록을 중지했습니다.');
       });
 
       socket.on('media-chunk', async (data: { socketId: string, userId?: string, chunk: ArrayBuffer | any, mimeType?: string, timestamp?: number }) => {
@@ -799,9 +832,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       // STREAMING SUBTITLE HANDLERS (3-step pipeline)
 
+      const getSubtitleLatencyMs = (data: Partial<SubtitleData>) => {
+        if (typeof data.latencyMs === 'number') return data.latencyMs;
+        if (data.translationStartedAt && data.translationFinishedAt) {
+          return Math.max(0, data.translationFinishedAt - data.translationStartedAt);
+        }
+        if (data.serverReceivedAt) return Math.max(0, Date.now() - data.serverReceivedAt);
+        if (data.clientTimestamp) return Math.max(0, Date.now() - data.clientTimestamp);
+        return undefined;
+      };
+
       const upsertStreamingSubtitle = (data: Partial<SubtitleData> & { id: string; userId: string; userName: string; originalText?: string; clientTimestamp?: number; serverReceivedAt?: number; translationStartedAt?: number; translationFinishedAt?: number }) => {
         setSubtitles(prev => {
           const existing = prev.find(s => s.id === data.id);
+          const latencyMs = getSubtitleLatencyMs({ ...existing, ...data });
           const nextSubtitle: SubtitleData = existing ? {
             ...existing,
             ...data,
@@ -809,6 +853,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             en: data.en ?? existing.en,
             ja: data.ja ?? existing.ja,
             zh: data.zh ?? existing.zh,
+            latencyMs,
             clientTimestamp: data.clientTimestamp ?? existing.clientTimestamp,
             serverReceivedAt: data.serverReceivedAt ?? existing.serverReceivedAt,
             translationStartedAt: data.translationStartedAt ?? existing.translationStartedAt,
@@ -824,7 +869,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             zh: data.zh ?? '...',
             isFinal: data.isFinal,
             sequence: data.sequence,
-            latencyMs: undefined,
+            latencyMs,
             clientTimestamp: data.clientTimestamp,
             serverReceivedAt: data.serverReceivedAt,
             translationStartedAt: data.translationStartedAt,
@@ -839,6 +884,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       // Step 1: Original text arrives instantly → show placeholder immediately
       socket.on('subtitle-stream-start', (data: SubtitleData & { originalText: string }) => {
+        const latencyMs = getSubtitleLatencyMs(data);
         const placeholder: SubtitleData = {
           id: data.id,
           userId: data.userId,
@@ -850,7 +896,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           zh: '...',
           isFinal: data.isFinal,
           sequence: data.sequence,
-          latencyMs: undefined, // Not yet known
+          latencyMs,
           clientTimestamp: data.clientTimestamp,
           serverReceivedAt: data.serverReceivedAt,
           translationStartedAt: data.translationStartedAt,
@@ -869,19 +915,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       // Step 2: Interim translated captions update the same subtitle row in-place.
       socket.on('subtitle-stream-update', (data: SubtitleData & { originalText?: string }) => {
-        upsertStreamingSubtitle(data);
+        upsertStreamingSubtitle({ ...data, latencyMs: getSubtitleLatencyMs(data) });
       });
 
       // Step 3: Final parsed translations arrive → replace placeholder in-place
       socket.on('subtitle-broadcast', (data: SubtitleData) => {
-        const latencyMs = data.translationStartedAt && data.translationFinishedAt
-          ? data.translationFinishedAt - data.translationStartedAt
-          : data.serverReceivedAt
-          ? Date.now() - data.serverReceivedAt
-          : data.clientTimestamp
-            ? Date.now() - data.clientTimestamp
-            : undefined;
-        if (latencyMs) {
+        const latencyMs = getSubtitleLatencyMs(data);
+        if (typeof latencyMs === 'number') {
           console.log(`[Subtitle Latency] ${latencyMs}ms`);
           // Keep last 20 measurements for rolling average
           setLatencyHistory(prev => [...prev.slice(-19), latencyMs]);
@@ -927,6 +967,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       });
 
+      socket.on('room-ended', () => {
+        showSystemNotice('방장이 회의를 종료했습니다.');
+        socket.disconnect();
+        router.push('/');
+      });
+
       socket.on('disconnect', (reason) => {
         console.log('Client: Disconnected from WebSocket server', reason);
       });
@@ -967,11 +1013,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
+      closeAudioContext();
     };
-  }, [roomId, status, currentUserId]);
+  }, [roomId, status, currentUserId, closeAudioContext]);
 
   // Handle browser tab close / refresh
   useEffect(() => {
@@ -1236,10 +1280,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       localStreamRef.current = null;
     }
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(() => {});
-      audioContextRef.current = null;
-    }
+    closeAudioContext();
 
     if (speakingIntervalRef.current) {
       clearInterval(speakingIntervalRef.current);
@@ -1277,6 +1318,56 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         console.error(`[VideoRef] Playback failed for ${userId}`, error);
       }
     });
+  };
+
+  const applyRemoteLiveCatchup = (socketId: string, reason: 'interval' | 'updateend' = 'interval') => {
+    const sourceBuffer = sourceBuffersRef.current[socketId];
+    const userId = socketIdToUserIdMap.current[socketId];
+    const videoElement = userId ? remoteVideoRefs.current[userId] : null;
+    if (!sourceBuffer || !videoElement || sourceBuffer.buffered.length === 0) return;
+
+    try {
+      const liveEdge = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+      const latency = liveEdge - videoElement.currentTime;
+
+      if (videoElement.paused && videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        playRemoteVideo(videoElement, userId);
+      }
+
+      if (latency > 3) {
+        videoElement.currentTime = Math.max(0, liveEdge - 0.35);
+        videoElement.playbackRate = 1.0;
+        console.log(`[Latency] Jumped to live edge (${latency.toFixed(2)}s, ${reason})`);
+        return;
+      }
+
+      let nextRate = 1.0;
+      if (latency > 1.5) nextRate = 1.25;
+      else if (latency > 0.9) nextRate = 1.15;
+      else if (latency > 0.45) nextRate = 1.06;
+
+      if (Math.abs(videoElement.playbackRate - nextRate) > 0.01) {
+        videoElement.playbackRate = nextRate;
+        console.log(`[Latency] playbackRate=${nextRate.toFixed(2)} lag=${latency.toFixed(2)}s (${reason})`);
+      }
+    } catch (error) {
+      console.warn(`[Latency] Catch-up failed for ${socketId}`, error);
+    }
+  };
+
+  const startRemoteLatencyMonitor = (socketId: string) => {
+    if (remoteLatencyIntervalsRef.current[socketId]) return;
+
+    remoteLatencyIntervalsRef.current[socketId] = setInterval(() => {
+      applyRemoteLiveCatchup(socketId, 'interval');
+    }, 500);
+  };
+
+  const stopRemoteLatencyMonitor = (socketId: string) => {
+    const interval = remoteLatencyIntervalsRef.current[socketId];
+    if (!interval) return;
+    clearInterval(interval);
+    delete remoteLatencyIntervalsRef.current[socketId];
   };
 
   const setupMediaSource = (userId: string, socketId: string, mimeType: string = 'video/webm; codecs="vp8, opus"') => {
@@ -1318,6 +1409,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
         sourceBuffersRef.current[socketId] = sourceBuffer;
+        startRemoteLatencyMonitor(socketId);
 
         sourceBuffer.addEventListener('updateend', async () => {
           // Safety check: Ensure the buffer is still active and the MediaSource is open
@@ -1355,54 +1447,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             console.warn(`[Buffer] SourceBuffer error during updateend for ${socketId}`, e);
           }
 
-          // Latency Management (Smooth Catch-up Logic)
-          // Instead of jumping (which causes visible freezes), gradually speed up
-          // playback to smoothly close the gap with the live edge.
-          if (videoElement && !videoElement.paused) {
-            try {
-              const buffered = sourceBuffer.buffered;
-              if (buffered.length > 0) {
-                const end = buffered.end(buffered.length - 1);
-                const latency = end - currentTime;
-
-                // Emergency jump (only for extreme lag > 5s, e.g. tab was backgrounded)
-                if (latency > 5) {
-                  console.log(`[Latency] Emergency jump to live edge (Lag: ${latency.toFixed(2)}s)`);
-                  videoElement.currentTime = end - 0.3;
-                  videoElement.playbackRate = 1.0;
-                }
-                // Tier 3: Fast catch-up (1.5s ~ 5s lag) → 1.1x speed
-                else if (latency > 1.5) {
-                  if (videoElement.playbackRate !== 1.1) {
-                    console.log(`[Latency] 1.1x speed (Lag: ${latency.toFixed(2)}s)`);
-                    videoElement.playbackRate = 1.1;
-                  }
-                }
-                // Tier 2: Medium catch-up (0.8s ~ 1.5s lag) → 1.05x speed
-                else if (latency > 0.8) {
-                  if (videoElement.playbackRate !== 1.05) {
-                    console.log(`[Latency] 1.05x speed (Lag: ${latency.toFixed(2)}s)`);
-                    videoElement.playbackRate = 1.05;
-                  }
-                }
-                // Tier 1: Gentle catch-up (0.3s ~ 0.8s lag) → 1.02x speed
-                else if (latency > 0.3) {
-                  if (videoElement.playbackRate !== 1.02) {
-                    videoElement.playbackRate = 1.02;
-                  }
-                }
-                // Normal: Synced (< 0.3s lag) → 1.0x speed
-                else {
-                  if (videoElement.playbackRate !== 1.0) {
-                    console.log(`[Latency] Synced! (Lag: ${latency.toFixed(2)}s)`);
-                    videoElement.playbackRate = 1.0;
-                  }
-                }
-              }
-            } catch (e) {
-              console.warn(`[Latency] Error in catch-up logic for ${socketId}`, e);
-            }
-          }
+          applyRemoteLiveCatchup(socketId, 'updateend');
 
           // Process queued chunks
           if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
@@ -1462,6 +1507,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const cleanupMediaSource = (socketId: string) => {
     console.log(`Cleaning up MediaSource for ${socketId}`);
+    stopRemoteLatencyMonitor(socketId);
     const mediaSource = mediaSourcesRef.current[socketId];
     if (mediaSource && mediaSource.readyState === 'open') {
       try {
@@ -1478,6 +1524,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         if (src && src.startsWith('blob:')) {
           URL.revokeObjectURL(src);
         }
+        videoEl.playbackRate = 1.0;
         videoEl.src = '';
         videoEl.removeAttribute('src');
         videoEl.load();
@@ -1822,13 +1869,36 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
   };
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(window.location.href);
-    setIsLinkCopied(true);
-    setTimeout(() => {
-      setIsLinkCopied(false);
-    }, 2000);
+  const showSystemNotice = (message: string) => {
+    if (systemNoticeTimeoutRef.current) {
+      clearTimeout(systemNoticeTimeoutRef.current);
+    }
+    setSystemNotice(message);
+    systemNoticeTimeoutRef.current = setTimeout(() => {
+      setSystemNotice('');
+      systemNoticeTimeoutRef.current = null;
+    }, 2400);
   };
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setIsLinkCopied(true);
+      showSystemNotice('회의 링크를 복사했습니다.');
+      setTimeout(() => {
+        setIsLinkCopied(false);
+      }, 2000);
+    } catch (error) {
+      console.error('Failed to copy meeting link:', error);
+      showSystemNotice('링크 복사에 실패했습니다.');
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (systemNoticeTimeoutRef.current) clearTimeout(systemNoticeTimeoutRef.current);
+    };
+  }, []);
 
   const leaveRoom = () => {
     console.log('Client: Leaving room');
@@ -1837,9 +1907,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     mediaRecorderRef.current?.stop();
     localStreamRef.current?.getTracks().forEach(track => track.stop());
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-    }
+    closeAudioContext();
 
     // Explicitly notify server before disconnecting and wait for Ack
     if (socketRef.current?.connected) {
@@ -1861,9 +1929,43 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
+  const endMeetingAndDeleteRoom = async () => {
+    if (!isHost || isEndingMeeting) return;
+
+    console.log('Client: Ending meeting and deleting room');
+    setIsEndingMeeting(true);
+    stopSubtitleAudioStreaming();
+    socketRef.current?.emit('subtitle-stt-stop', { roomId });
+    mediaRecorderRef.current?.stop();
+    localStreamRef.current?.getTracks().forEach(track => track.stop());
+    closeAudioContext();
+
+    try {
+      const response = await fetch(`/api/meeting/${roomId}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to delete meeting');
+      }
+
+      socketRef.current?.disconnect();
+      router.push('/');
+    } catch (error) {
+      console.error('Failed to end meeting:', error);
+      showSystemNotice('회의방 삭제에 실패했습니다.');
+      setIsEndingMeeting(false);
+    }
+  };
+
   const handleEndCallClick = () => {
     if (exitImmediately) {
-      leaveRoom();
+      if (isHost && deleteRoomOnHostEnd) {
+        void endMeetingAndDeleteRoom();
+      } else {
+        leaveRoom();
+      }
     } else {
       setShowEndCallModal(true);
     }
@@ -1873,6 +1975,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const newValue = e.target.checked;
     setExitImmediately(newValue);
     localStorage.setItem('exitImmediately', String(newValue));
+  };
+
+  const handleDeleteRoomOnHostEndChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newValue = e.target.checked;
+    setDeleteRoomOnHostEnd(newValue);
+    localStorage.setItem('deleteRoomOnHostEnd', String(newValue));
   };
 
   // --- Chat Logic ---
@@ -1942,6 +2050,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
   };
 
+  const setSttSaving = (enabled: boolean) => {
+    if (!isHost || !socketRef.current?.connected || isSttSavingUpdating) return;
+    setIsSttSavingUpdating(true);
+    socketRef.current.emit('set-stt-saving', {
+      roomId,
+      enabled,
+    });
+  };
+
   const revokeBroadcastPresenter = (targetUserId: string) => {
     if (!isHost || !socketRef.current?.connected || targetUserId === currentUserId) return;
     setBroadcastPresenter(currentUserId);
@@ -1956,15 +2073,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   // Auto-hide controls logic
   const autoHideTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isHoveringControlsRef = useRef(false);
+  const hasOpenModalPanel = showParticipantsPanel || showMorePanel || showEndCallModal;
 
   const resetControlsTimer = useCallback(() => {
     if (autoHideTimerRef.current) {
       clearTimeout(autoHideTimerRef.current);
     }
+    if (hasOpenModalPanel) {
+      setShowControls(true);
+      return;
+    }
     autoHideTimerRef.current = setTimeout(() => {
       setShowControls(false);
     }, 3000);
-  }, []);
+  }, [hasOpenModalPanel]);
 
   useEffect(() => {
     resetControlsTimer();
@@ -1973,9 +2095,33 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     };
   }, [resetControlsTimer]);
 
-  // NOTE: Latency management is handled inside the MediaSource updateend handler
-  // with a smooth 4-tier catch-up system (1.02x / 1.05x / 1.1x / emergency jump).
-  // No additional interval-based latency check is needed here.
+  useEffect(() => {
+    if (!hasOpenModalPanel) return;
+    setShowControls(true);
+    if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+  }, [hasOpenModalPanel]);
+
+  useEffect(() => {
+    const handleEscapeKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+
+      if (showEndCallModal) {
+        setShowEndCallModal(false);
+      } else if (showMorePanel) {
+        setShowMorePanel(false);
+      } else if (showParticipantsPanel) {
+        setShowParticipantsPanel(false);
+      } else if (showChatPanel) {
+        setShowChatPanel(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleEscapeKey);
+    return () => window.removeEventListener('keydown', handleEscapeKey);
+  }, [showChatPanel, showEndCallModal, showMorePanel, showParticipantsPanel]);
+
+  // Remote media latency is corrected both on MediaSource updateend and on a
+  // periodic monitor so playback does not drift when update events slow down.
 
 
 
@@ -2123,11 +2269,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       return [...prev, lang];
     });
   };
+  const allParticipants = [localParticipant, ...participants.filter(p => p.userId !== currentUserId)];
+  const remoteParticipants = allParticipants.filter(p => p.userId !== mainSpeaker.userId);
+  const presenterCount = allParticipants.filter(p => p.canBroadcast).length;
+  const subtitleLanguageLabels: Record<SubtitleLang, string> = {
+    ko: '한국어',
+    en: '영어',
+    ja: '일본어',
+    zh: '중국어',
+  };
 
   return (
     <div
-      className="fixed inset-0 bg-background text-foreground overflow-hidden"
+      className="fixed inset-0 overflow-hidden bg-zinc-950 text-foreground"
       onClick={() => {
+        if (hasOpenModalPanel) {
+          setShowControls(true);
+          if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
+          return;
+        }
         if (showControls) {
           setShowControls(false);
           if (autoHideTimerRef.current) clearTimeout(autoHideTimerRef.current);
@@ -2137,25 +2297,37 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
       }}
       onMouseMove={() => {
-        if (showControls) {
+        if (showControls && !hasOpenModalPanel) {
           resetControlsTimer();
         }
       }}
     >
-      <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row h-full">
-        <main className="flex-1 bg-neutral-900 relative p-4 pb-20 md:pb-4 flex items-center justify-center transition-all duration-300 overflow-hidden group min-h-0">
+      <div
+        role="status"
+        aria-live="polite"
+        className={cn(
+          "pointer-events-none fixed left-1/2 top-4 z-[70] max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-full border border-white/10 bg-zinc-950/92 px-4 py-2 text-sm font-medium text-white shadow-2xl shadow-black/35 backdrop-blur-md transition-all duration-200",
+          systemNotice ? "translate-y-0 opacity-100" : "-translate-y-3 opacity-0"
+        )}
+      >
+        {systemNotice}
+      </div>
+      <div className="relative flex h-full flex-1 flex-col overflow-hidden md:flex-row">
+        <main className="group relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(39,39,42,0.95),rgba(9,9,11,1)_42%)] p-3 pb-20 transition-all duration-300 md:p-4 md:pb-4">
 
           <div
             onMouseEnter={handleControlsMouseEnter}
             onMouseLeave={handleControlsMouseLeave}
+            role="toolbar"
+            aria-label="회의 컨트롤"
             className={cn(
-              "absolute top-0 left-0 right-0 p-4 md:p-6 z-20 flex justify-between items-start transition-all duration-500 ease-out",
+              "absolute left-0 right-0 top-0 z-20 flex items-start justify-between gap-3 p-3 transition-all duration-500 ease-out md:p-5",
               showControls ? "translate-y-0 opacity-100" : "-translate-y-full opacity-0 pointer-events-none"
             )}
             onClick={(e) => e.stopPropagation()}
           >
             {/* Meeting Info */}
-            <div className="bg-black/40 backdrop-blur-xl p-2.5 md:p-3 rounded-2xl text-white shadow-lg border border-white/10 flex items-center gap-3">
+            <div className="flex max-w-[calc(100vw-8rem)] items-center gap-3 rounded-2xl border border-white/10 bg-black/45 p-2.5 text-white shadow-lg backdrop-blur-xl md:max-w-none md:p-3">
               <div className="flex flex-col">
                 {isEditingTitle ? (
                   <Input
@@ -2175,8 +2347,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           setIsEditingTitle(true);
                         }
                       }}
-                      className={cn("font-semibold text-sm md:text-base tracking-wide", isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
-                      title={isHost ? "Click to edit title" : undefined}
+                      className={cn("font-semibold text-sm tracking-wide md:text-base", isHost && "cursor-pointer hover:underline decoration-dashed underline-offset-4")}
+                      title={isHost ? "회의 제목 수정" : undefined}
                     >
                       {meetingTitle}
                     </span>
@@ -2188,7 +2360,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     )}
                   </div>
                 )}
-                <span className="text-[10px] md:text-xs text-white/50 font-mono mt-0.5 tracking-wider hidden md:block">ID: {roomId}</span>
+                <span className="mt-0.5 hidden font-mono text-[10px] tracking-wider text-white/50 md:block">ID: {roomId}</span>
+              </div>
+              <div className="hidden h-8 w-px bg-white/10 md:block" />
+              <div className="hidden items-center gap-1.5 md:flex">
+                <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-1 text-[11px] font-medium text-white/75">
+                  <Users className="h-3.5 w-3.5" />
+                  {participants.length + 1}
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-1 text-[11px] font-medium text-emerald-200">
+                  <Radio className="h-3.5 w-3.5" />
+                  {broadcastMode === 'all' ? '전체 화자' : `${presenterCount || 1}명 화자`}
+                </span>
               </div>
             </div>
 
@@ -2203,7 +2386,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 )}
                 onClick={() => setLayoutMode('speaker')}
               >
-                <Maximize className="w-4 h-4 md:mr-2" /> <span className="text-sm font-medium hidden md:inline">Speaker</span>
+                <Maximize className="w-4 h-4 md:mr-2" /> <span className="hidden text-sm font-medium md:inline">발표자</span>
               </Button>
               <Button
                 variant="ghost"
@@ -2214,18 +2397,18 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 )}
                 onClick={() => setLayoutMode('grid')}
               >
-                <LayoutGrid className="w-4 h-4 md:mr-2" /> <span className="text-sm font-medium hidden md:inline">Gallery</span>
+                <LayoutGrid className="w-4 h-4 md:mr-2" /> <span className="hidden text-sm font-medium md:inline">갤러리</span>
               </Button>
             </div>
           </div>
 
           {/* Main Video Area */}
-          <div className="w-full h-full p-2 md:p-4 pt-14 min-h-0 flex flex-col">
+          <div className="flex h-full min-h-0 w-full flex-col p-1 pt-14 md:p-3 md:pt-14">
 
             {layoutMode === 'grid' ? (
               /* --- GRID VIEW (Smart Grid) --- */
-              <div className="flex-1 flex flex-wrap justify-center content-center gap-2 md:gap-4 w-full h-full p-2 overflow-y-auto">
-                {[localParticipant, ...participants.filter(p => p.userId !== currentUserId)].map((p, index, array) => {
+              <div className="flex h-full w-full flex-1 flex-wrap content-center justify-center gap-2 overflow-y-auto p-1 md:gap-3 md:p-2">
+                {allParticipants.map((p, index, array) => {
                   const count = array.length;
                   let gridClass = "w-full h-full"; // Default 1 user
 
@@ -2256,7 +2439,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                         speakerAction={getSpeakerAction(p)}
                         speakerActionLabel={getSpeakerActionLabel(p)}
                         onSpeakerAction={handleSpeakerAction}
-                        className="w-full h-full border border-white/10 rounded-xl md:rounded-2xl bg-black/40 overflow-hidden shadow-lg"
+                        className="h-full w-full bg-black/40 shadow-lg"
                       />
                     </div>
                   );
@@ -2266,7 +2449,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
               /* --- SPEAKER VIEW (Filmstrip) --- */
               <div className="flex-1 flex flex-col w-full h-full overflow-hidden gap-2">
                 {/* Main Stage (Active Speaker) */}
-                <div className="flex-1 relative w-full min-h-0 bg-black/20 rounded-lg overflow-hidden border border-white/10">
+                <div className="relative min-h-0 w-full flex-1 overflow-hidden rounded-2xl border border-white/10 bg-black/20 shadow-2xl">
                   <ParticipantCard
                     participant={mainSpeaker}
                     isLocal={mainSpeaker.userId === currentUserId}
@@ -2280,15 +2463,15 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     speakerAction={getSpeakerAction(mainSpeaker)}
                     speakerActionLabel={getSpeakerActionLabel(mainSpeaker)}
                     onSpeakerAction={handleSpeakerAction}
-                    className="w-full h-full"
+                    className="h-full w-full"
                   />
                 </div>
 
                 {/* Filmstrip (Other Participants) */}
-                <div className="h-24 md:h-32 flex gap-2 overflow-x-auto overflow-y-hidden pb-2 px-1 flex-shrink-0 snap-x">
-                  {[localParticipant, ...participants.filter(p => p.userId !== currentUserId)]
-                    .filter(p => p.userId !== mainSpeaker.userId) // Exclude main speaker
-                    .map(p => (
+                {remoteParticipants.length > 0 && (
+                <div className="h-24 flex-shrink-0 snap-x overflow-x-auto overflow-y-hidden px-1 pb-2 md:h-32">
+                  <div className="flex h-full gap-2">
+                  {remoteParticipants.map(p => (
                       <div key={p.userId} className="w-32 md:w-48 h-full flex-shrink-0 snap-start">
                         <ParticipantCard
                           participant={p}
@@ -2303,45 +2486,46 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           speakerAction={getSpeakerAction(p)}
                           speakerActionLabel={getSpeakerActionLabel(p)}
                           onSpeakerAction={handleSpeakerAction}
-                          className="w-full h-full border-2 border-transparent hover:border-primary/50 transition-all"
+                          className="h-full w-full border border-white/10 transition-all hover:border-primary/60"
                         />
                       </div>
                     ))}
+                  </div>
                 </div>
+                )}
               </div>
             )}
           </div>
 
-          {/* Subtitles Overlay (Netflix Style) */}
+          {/* Subtitles Overlay */}
           {shouldShowSubtitles && (
-            <div className="absolute bottom-32 left-0 right-0 z-40 flex flex-col items-center justify-end pointer-events-none px-4 gap-2">
+            <div className="pointer-events-none absolute bottom-32 left-0 right-0 z-40 flex flex-col items-center justify-end gap-2 px-3 md:px-6">
               {subtitles.map((sub) => (
-                <div key={sub.id} className="bg-black/70 backdrop-blur-sm px-4 py-2 rounded-lg max-w-3xl w-full text-center shadow-2xl animate-in slide-in-from-bottom-2 fade-in duration-300">
-                  {/* Speaker name + latency badge */}
-                  <div className="flex items-center justify-center gap-2 mb-1">
-                    <span className="text-xs text-blue-300 font-bold opacity-90">{sub.userName}</span>
-                    {sub.latencyMs && (
-                      <span className="text-[10px] bg-green-500/20 text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded-full font-mono font-bold">
+                <div key={sub.id} className="w-full max-w-3xl animate-in rounded-xl border border-white/10 bg-black/78 px-4 py-3 text-center shadow-2xl backdrop-blur-md slide-in-from-bottom-2 fade-in duration-300">
+                  <div className="mb-2 flex flex-wrap items-center justify-center gap-2 text-[11px]">
+                    <span className="font-semibold text-blue-200">{sub.userName}</span>
+                    {typeof sub.latencyMs === 'number' && (
+                      <span className="rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2 py-0.5 font-mono font-semibold text-emerald-200">
                         {sub.latencyMs}ms
                       </span>
                     )}
-                  </div>
-                  <div className="mb-1 flex items-center justify-center gap-2 text-[10px] font-mono text-white/60">
-                    <span>시작 {formatSubtitleTime(sub.translationStartedAt)}</span>
-                    <span>종료 {formatSubtitleTime(sub.translationFinishedAt)}</span>
+                    <span className="inline-flex items-center gap-1 font-mono text-white/45">
+                      <Clock3 className="h-3 w-3" />
+                      {formatSubtitleTime(sub.translationStartedAt)} - {formatSubtitleTime(sub.translationFinishedAt)}
+                    </span>
                   </div>
                   <div className="flex flex-col gap-1">
                     {selectedSubtitleLangs.has('ko') && (
-                      <p className="text-white font-medium text-sm md:text-base leading-snug drop-shadow-md">🇰🇷 {sub.ko}</p>
+                      <p className="text-sm font-medium leading-snug text-white drop-shadow-md md:text-base">KO {sub.ko}</p>
                     )}
                     {selectedSubtitleLangs.has('en') && (
-                      <p className="text-yellow-400 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇺🇸 {sub.en}</p>
+                      <p className="text-sm font-medium leading-snug text-yellow-200 drop-shadow-md md:text-base">EN {sub.en}</p>
                     )}
                     {selectedSubtitleLangs.has('ja') && (
-                      <p className="text-green-300 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇯🇵 {sub.ja}</p>
+                      <p className="text-sm font-medium leading-snug text-emerald-200 drop-shadow-md md:text-base">JA {sub.ja}</p>
                     )}
                     {selectedSubtitleLangs.has('zh') && (
-                      <p className="text-pink-300 font-medium text-sm md:text-base leading-snug drop-shadow-md">🇨🇳 {sub.zh}</p>
+                      <p className="text-sm font-medium leading-snug text-rose-200 drop-shadow-md md:text-base">ZH {sub.zh}</p>
                     )}
                   </div>
                 </div>
@@ -2373,11 +2557,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             onMouseEnter={handleControlsMouseEnter}
             onMouseLeave={handleControlsMouseLeave}
             className={cn(
-              "fixed z-50 transition-all duration-500 ease-out flex items-center justify-center gap-1 md:gap-2 shadow-2xl",
+              "fixed z-50 flex items-center justify-center gap-1 shadow-2xl transition-all duration-500 ease-out md:gap-2",
               // Mobile Styles: Bottom fixed
-              "bottom-4 left-4 right-4 h-auto bg-black/80 backdrop-blur-xl border border-white/10 rounded-2xl px-2 py-2",
+              "bottom-4 left-4 right-4 h-auto rounded-2xl border border-white/10 bg-black/82 px-2 py-2 backdrop-blur-xl",
               // Desktop Styles: Floating pill, centered
-              "md:bottom-8 md:left-1/2 md:transform md:-translate-x-1/2 md:bg-[#1C1F2E]/90 md:rounded-3xl md:px-4 md:py-2 md:w-auto",
+              "md:bottom-8 md:left-1/2 md:w-auto md:-translate-x-1/2 md:transform md:rounded-3xl md:bg-zinc-900/92 md:px-4 md:py-2",
               showControls ? "translate-y-0 opacity-100" : "translate-y-24 opacity-0 pointer-events-none"
             )}
             onClick={(e) => e.stopPropagation()}
@@ -2393,10 +2577,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 )}
                 disabled={!isBroadcastPresenter}
                 onClick={toggleMute}
+                aria-label={isBroadcastPresenter ? (isMuted ? '마이크 켜기' : '마이크 끄기') : '수신 전용 참가자입니다'}
+                aria-pressed={!isMuted}
                 title={isBroadcastPresenter ? undefined : "Receive-only attendee"}
               >
                 {isMuted ? <MicOff className="w-5 h-5 md:w-6 md:h-6 mb-1" /> : <Mic className="w-5 h-5 md:w-6 md:h-6 mb-1" />}
-                <span className="text-[10px] md:text-xs font-medium">{isBroadcastPresenter ? (isMuted ? 'Unmute' : 'Mute') : 'Listen'}</span>
+                <span className="text-[10px] font-medium md:text-xs">{isBroadcastPresenter ? (isMuted ? '마이크 켜기' : '마이크 끄기') : '수신'}</span>
               </Button>
 
               <Button
@@ -2408,10 +2594,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 )}
                 disabled={!isBroadcastPresenter}
                 onClick={toggleCamera}
+                aria-label={isBroadcastPresenter ? (localVideoOn ? '카메라 끄기' : '카메라 켜기') : '수신 전용 참가자입니다'}
+                aria-pressed={localVideoOn}
                 title={isBroadcastPresenter ? undefined : "Receive-only attendee"}
               >
                 {localVideoOn ? <Video className="w-5 h-5 md:w-6 md:h-6 mb-1" /> : <VideoOff className="w-5 h-5 md:w-6 md:h-6 mb-1" />}
-                <span className="text-[10px] md:text-xs font-medium">{isBroadcastPresenter ? (localVideoOn ? 'Stop Video' : 'Start Video') : 'View'}</span>
+                <span className="text-[10px] font-medium md:text-xs">{isBroadcastPresenter ? (localVideoOn ? '카메라 끄기' : '카메라 켜기') : '보기'}</span>
               </Button>
 
               <Button
@@ -2423,10 +2611,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 )}
                 disabled={!isBroadcastPresenter}
                 onClick={toggleScreenShare}
+                aria-label={isBroadcastPresenter ? (isScreenSharing ? '화면 공유 중지' : '화면 공유 시작') : '수신 전용 참가자입니다'}
+                aria-pressed={isScreenSharing}
                 title={isBroadcastPresenter ? undefined : "Receive-only attendee"}
               >
                 <MonitorUp className="w-5 h-5 md:w-6 md:h-6 mb-1" />
-                <span className="text-[10px] md:text-xs font-medium">{isBroadcastPresenter ? (isScreenSharing ? 'Stop Share' : 'Screen Share') : 'Receive'}</span>
+                <span className="text-[10px] font-medium md:text-xs">{isBroadcastPresenter ? (isScreenSharing ? '공유 중지' : '화면 공유') : '수신'}</span>
               </Button>
 
               <div className="relative group">
@@ -2437,14 +2627,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     isSubtitlesEnabled && "text-yellow-400 bg-white/10"
                   )}
                   onClick={() => setIsSubtitlesEnabled(!isSubtitlesEnabled)}
+                  aria-label={isSubtitlesEnabled ? '자막 끄기' : '자막 켜기'}
+                  aria-pressed={isSubtitlesEnabled}
                 >
                   <Subtitles className="w-5 h-5 md:w-6 md:h-6 mb-1" />
-                  <span className="text-[10px] md:text-xs font-medium">CC</span>
+                  <span className="text-[10px] font-medium md:text-xs">자막</span>
                 </Button>
                 
                 {/* Language Selector Popup (Visible on Hover when CC is active) */}
                 {isSubtitlesEnabled && (
-                  <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-black/90 backdrop-blur-md rounded-lg p-3 flex flex-col gap-3 border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-50 shadow-xl">
+                  <div className="absolute bottom-full left-1/2 z-50 mb-2 flex -translate-x-1/2 flex-col gap-3 rounded-xl border border-white/10 bg-black/92 p-3 opacity-0 shadow-xl backdrop-blur-md transition-opacity group-hover:opacity-100 whitespace-nowrap">
                     {/* View Language */}
                     <div className="flex flex-col gap-1">
                       <span className="text-[10px] text-gray-400 font-bold px-1 mb-0.5">번역 자막 선택</span>
@@ -2453,10 +2645,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           <button
                             key={'view-' + lang}
                             className={cn(
-                              "text-xs px-2.5 py-1 rounded hover:bg-white/20 transition-colors uppercase font-bold text-center flex-1",
+                              "flex-1 rounded px-2.5 py-1 text-center text-xs font-bold uppercase transition-colors hover:bg-white/20",
                               subtitleLangs.includes(lang) ? "bg-primary text-white" : "text-gray-300 bg-white/5"
                             )}
                             onClick={(e) => { e.stopPropagation(); toggleSubtitleLang(lang); }}
+                            title={subtitleLanguageLabels[lang]}
                           >
                             {lang}
                           </button>
@@ -2480,7 +2673,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           <button
                             key={'stt-' + lang.val}
                             className={cn(
-                              "text-xs px-2.5 py-1 rounded hover:bg-white/20 transition-colors uppercase font-bold text-center flex-1",
+                              "flex-1 rounded px-2.5 py-1 text-center text-xs font-bold uppercase transition-colors hover:bg-white/20",
                               sttLang === lang.val ? "bg-blue-500 text-white" : "text-gray-300 bg-white/5"
                             )}
                             onClick={(e) => { 
@@ -2512,9 +2705,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   showParticipantsPanel && "bg-white/20 text-blue-400"
                 )}
                 onClick={() => setShowParticipantsPanel(true)}
+                aria-label="참가자 패널 열기"
+                aria-expanded={showParticipantsPanel}
               >
                 <Users className="w-5 h-5 md:w-6 md:h-6 mb-1" />
-                <span className="text-[10px] md:text-xs font-medium hidden md:block">Participants</span>
+                <span className="hidden text-[10px] font-medium md:block md:text-xs">참가자</span>
                 <span className="absolute top-1 right-2 bg-primary text-primary-foreground text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[16px] flex items-center justify-center">
                   {participants.length + 1}
                 </span>
@@ -2527,18 +2722,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                   showChatPanel && "bg-white/20 text-blue-400"
                 )}
                 onClick={() => setShowChatPanel(!showChatPanel)}
+                aria-label={showChatPanel ? '채팅 닫기' : '채팅 열기'}
+                aria-expanded={showChatPanel}
               >
                 <MessageSquare className="w-5 h-5 md:w-6 md:h-6 mb-1" />
-                <span className="text-[10px] md:text-xs font-medium hidden md:block">Chat</span>
+                <span className="hidden text-[10px] font-medium md:block md:text-xs">채팅</span>
               </Button>
 
               <Button
                 variant="ghost"
                 className="flex flex-col items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-xl hover:bg-white/10 text-white transition-all"
                 onClick={() => setShowMorePanel(true)}
+                aria-label="회의 설정 열기"
+                aria-expanded={showMorePanel}
               >
                 <Settings className="w-5 h-5 md:w-6 md:h-6 mb-1" />
-                <span className="text-[10px] md:text-xs font-medium hidden md:block">Settings</span>
+                <span className="hidden text-[10px] font-medium md:block md:text-xs">설정</span>
               </Button>
             </div>
 
@@ -2548,8 +2747,9 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 variant="destructive"
                 className="rounded-xl md:rounded-2xl px-4 md:px-6 h-10 md:h-14 font-semibold shadow-lg shadow-red-500/20 hover:shadow-red-500/40 text-sm md:text-base flex items-center gap-2"
                 onClick={handleEndCallClick}
+                aria-label="회의 종료"
               >
-                End <span className="hidden md:inline">Meeting</span>
+                종료
               </Button>
             </div>
           </div>
@@ -2574,78 +2774,100 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           />
         </div>
 
-        {/* Participants Panel (Modal) */}
+        {/* Participants Panel */}
         {
           showParticipantsPanel && (
-            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowParticipantsPanel(false)}>
-              <div className="bg-card p-5 rounded-lg shadow-2xl w-full max-w-lg m-4 border max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
-                <div className="flex justify-between items-start gap-4 mb-4">
+            <div
+              className="fixed inset-0 z-50 bg-black/45 backdrop-blur-sm"
+              onClick={(event) => {
+                event.stopPropagation();
+                setShowParticipantsPanel(false);
+              }}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="participants-panel-title"
+                className="absolute bottom-0 right-0 top-auto flex max-h-[82vh] w-full flex-col overflow-hidden rounded-t-2xl border border-white/10 bg-zinc-950 text-white shadow-2xl md:bottom-auto md:top-0 md:h-full md:max-h-none md:w-[400px] md:rounded-none md:border-l"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="border-b border-white/10 p-5">
+                  <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-lg font-bold">참가자</h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">{participants.length + 1}명 참여 중</p>
+                      <h3 id="participants-panel-title" className="text-lg font-bold">참가자</h3>
+                      <p className="mt-1 text-xs text-white/50">
+                        {participants.length + 1}명 참여 중 · {broadcastMode === 'all' ? '전체 화자 모드' : '단일 화자 모드'}
+                      </p>
                   </div>
-                  <Button variant="ghost" size="sm" onClick={() => setShowParticipantsPanel(false)}>닫기</Button>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-white/70 hover:bg-white/10 hover:text-white" onClick={() => setShowParticipantsPanel(false)} aria-label="참가자 패널 닫기">
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {broadcastMode === 'all' && (
+                    <div className="mt-4 rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+                      모든 참가자가 마이크와 카메라를 송출할 수 있습니다.
+                    </div>
+                  )}
                 </div>
 
-                <div className="overflow-y-auto flex-1 space-y-2">
-                  {/* Local User */}
-                  <div className="flex items-center justify-between gap-3 p-3 rounded-md bg-secondary/50 border">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold shrink-0">
+                <div className="flex-1 space-y-2 overflow-y-auto p-4">
+                  <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/20 text-xs font-bold">
                         {session?.user?.name?.[0]?.toUpperCase() || 'ME'}
                       </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-medium truncate">{session?.user?.name || 'Me'} (나)</span>
-                          {hostId === currentUserId && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300">방장</span>}
-                          {isBroadcastPresenter && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-300">화자</span>}
-                        </div>
-                        <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                          {isMuted ? <MicOff className="w-3.5 h-3.5 text-red-500" /> : <Mic className="w-3.5 h-3.5 text-green-500" />}
-                          {localVideoOn ? <Video className="w-3.5 h-3.5 text-green-500" /> : <VideoOff className="w-3.5 h-3.5 text-red-500" />}
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="truncate font-medium">{session?.user?.name || 'Me'} (나)</span>
+                            {hostId === currentUserId && <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] text-blue-200"><Crown className="h-3 w-3" />방장</span>}
+                            {isBroadcastPresenter && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-200"><Radio className="h-3 w-3" />화자</span>}
+                          </div>
+                          <div className="mt-1.5 flex items-center gap-2 text-xs text-white/50">
+                            {isMuted ? <MicOff className="h-3.5 w-3.5 text-red-300" /> : <Mic className="h-3.5 w-3.5 text-emerald-300" />}
+                            {localVideoOn ? <Video className="h-3.5 w-3.5 text-emerald-300" /> : <VideoOff className="h-3.5 w-3.5 text-red-300" />}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
                       {isHost && broadcastMode === 'single' && !isBroadcastPresenter && (
-                        <Button size="sm" variant="secondary" onClick={() => setBroadcastPresenter(currentUserId)}>
-                          내가 화자 되기
+                        <Button size="sm" variant="secondary" className="shrink-0 rounded-full" onClick={() => setBroadcastPresenter(currentUserId)}>
+                          내가 화자
                         </Button>
                       )}
-                    </div>
-                  </div>
+                        </div>
+                      </div>
 
-                  {/* Remote Users */}
                   {participants.map(p => (
-                    <div key={p.userId} className="flex items-center justify-between gap-3 p-3 rounded-md border hover:bg-secondary/30">
-                      <div className="flex items-center gap-3 min-w-0">
+                    <div key={p.userId} className="rounded-xl border border-white/10 bg-white/[0.025] p-3 transition-colors hover:bg-white/[0.06]">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-3">
                         {p.avatar_url ? (
-                          <Image src={p.avatar_url} alt={p.username} width={36} height={36} className="rounded-full object-cover shrink-0" />
+                            <Image src={p.avatar_url} alt={p.username} width={40} height={40} className="h-10 w-10 shrink-0 rounded-full object-cover" />
                         ) : (
-                          <div className="w-9 h-9 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold shrink-0">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/20 text-xs font-bold">
                             {p.username?.[0]?.toUpperCase()}
                           </div>
                         )}
                         <div className="min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-medium truncate">{p.username}</span>
-                            {hostId === p.userId && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300">방장</span>}
-                            {p.canBroadcast && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-300">화자</span>}
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="truncate font-medium">{p.username}</span>
+                              {hostId === p.userId && <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/15 px-2 py-0.5 text-[10px] text-blue-200"><Crown className="h-3 w-3" />방장</span>}
+                              {p.canBroadcast && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-200"><Radio className="h-3 w-3" />화자</span>}
                           </div>
-                          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                            {p.isMuted ? <MicOff className="w-3.5 h-3.5 text-red-500" /> : <Mic className="w-3.5 h-3.5 text-green-500" />}
-                            {p.hasVideo ? <Video className="w-3.5 h-3.5 text-green-500" /> : <VideoOff className="w-3.5 h-3.5 text-red-500" />}
+                            <div className="mt-1.5 flex items-center gap-2 text-xs text-white/50">
+                              {p.isMuted ? <MicOff className="h-3.5 w-3.5 text-red-300" /> : <Mic className="h-3.5 w-3.5 text-emerald-300" />}
+                              {p.hasVideo ? <Video className="h-3.5 w-3.5 text-emerald-300" /> : <VideoOff className="h-3.5 w-3.5 text-red-300" />}
                           </div>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 shrink-0">
                         {isHost && broadcastMode === 'single' && (
                           <Button
                             size="sm"
                             variant={p.canBroadcast ? "destructive" : "secondary"}
+                            className="shrink-0 rounded-full"
                             onClick={() => p.canBroadcast ? revokeBroadcastPresenter(p.userId) : setBroadcastPresenter(p.userId)}
                           >
-                            {p.canBroadcast ? '화자 권한 뺐기' : '화자 권한 주기'}
+                            {p.canBroadcast ? '권한 뺐기' : '화자 주기'}
                           </Button>
                         )}
                       </div>
@@ -2657,34 +2879,54 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           )
         }
 
-        {/* Settings / More Panel (Modal) */}
+        {/* Settings Panel */}
         {
           showMorePanel && (
-            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setShowMorePanel(false)}>
-              <div className="bg-card p-6 rounded-xl shadow-2xl w-full max-w-md m-4 border" onClick={e => e.stopPropagation()}>
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-xl font-bold">Settings</h3>
-                  <Button variant="ghost" size="sm" onClick={() => setShowMorePanel(false)}>Close</Button>
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm"
+              onClick={(event) => {
+                event.stopPropagation();
+                setShowMorePanel(false);
+              }}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="settings-panel-title"
+                className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-950 text-white shadow-2xl"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between border-b border-white/10 p-5">
+                  <div>
+                    <h3 id="settings-panel-title" className="text-lg font-bold">회의 설정</h3>
+                    <p className="mt-1 text-xs text-white/50">화자 모드, 장치, 자막 지연 상태를 조정합니다.</p>
+                  </div>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-white/70 hover:bg-white/10 hover:text-white" onClick={() => setShowMorePanel(false)} aria-label="회의 설정 닫기">
+                    <X className="h-4 w-4" />
+                  </Button>
                 </div>
 
-                <div className="space-y-4">
+                <div className="flex-1 space-y-4 overflow-y-auto p-5">
                   {isHost && (
-                    <div className="rounded-lg border bg-secondary/20 p-4 space-y-3">
-                      <div className="flex items-start justify-between gap-4">
+                    <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                         <div>
-                          <div className="text-sm font-bold">화자 모드</div>
-                          <div className="text-xs text-muted-foreground mt-1">
+                          <div className="flex items-center gap-2 text-sm font-bold">
+                            <Radio className="h-4 w-4 text-emerald-300" />
+                            화자 모드
+                          </div>
+                          <div className="mt-1 text-xs text-white/50">
                             {broadcastMode === 'all'
                               ? '모든 참가자가 영상과 음성을 송출할 수 있습니다.'
                               : '방장이 지정한 한 명만 영상과 음성을 송출합니다.'}
                           </div>
                         </div>
-                        <div className="flex rounded-md bg-background/70 p-1 border shrink-0">
+                        <div className="grid grid-cols-2 rounded-xl border border-white/10 bg-black/30 p-1">
                           <button
                             type="button"
                             className={cn(
-                              "px-3 py-1.5 text-xs font-semibold rounded transition-colors",
-                              broadcastMode === 'single' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                              "rounded-lg px-4 py-2 text-xs font-semibold transition-colors",
+                              broadcastMode === 'single' ? "bg-white text-zinc-950" : "text-white/55 hover:text-white"
                             )}
                             onClick={() => setRoomBroadcastMode('single')}
                           >
@@ -2693,8 +2935,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           <button
                             type="button"
                             className={cn(
-                              "px-3 py-1.5 text-xs font-semibold rounded transition-colors",
-                              broadcastMode === 'all' ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                              "rounded-lg px-4 py-2 text-xs font-semibold transition-colors",
+                              broadcastMode === 'all' ? "bg-white text-zinc-950" : "text-white/55 hover:text-white"
                             )}
                             onClick={() => setRoomBroadcastMode('all')}
                           >
@@ -2702,143 +2944,163 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           </button>
                         </div>
                       </div>
-                    </div>
+                    </section>
                   )}
 
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Camera</label>
-                    <select
-                      className="w-full p-2 border rounded-md bg-secondary"
-                      value={selectedVideoDeviceId || ''}
-                      onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
-                    >
-                      {availableVideoDevices.map(device => (
-                        <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
-                      ))}
-                    </select>
-                  </div>
+                  {isHost && (
+                    <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="flex items-center gap-2 text-sm font-bold">
+                            <Subtitles className="h-4 w-4 text-emerald-300" />
+                            STT 기록
+                          </div>
+                          <div className="mt-1 text-xs text-white/50">
+                            {isSttSaved
+                              ? '지금부터 확정된 자막 내용을 데이터베이스에 저장 중입니다.'
+                              : '버튼을 누른 이후의 확정 자막만 데이터베이스에 저장합니다.'}
+                          </div>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant={isSttSaved ? "destructive" : "secondary"}
+                          className="shrink-0 rounded-full"
+                          disabled={isSttSavingUpdating}
+                          onClick={() => setSttSaving(!isSttSaved)}
+                        >
+                          {isSttSavingUpdating ? '변경 중...' : isSttSaved ? '기록 중지' : '이때부터 기록 시작'}
+                        </Button>
+                      </div>
+                    </section>
+                  )}
 
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Microphone</label>
-                    <select
-                      className="w-full p-2 border rounded-md bg-secondary"
-                      value={selectedAudioInputDeviceId || ''}
-                      onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}
-                    >
-                      {availableAudioInputDevices.map(device => (
-                        <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Speaker</label>
-                    <select
-                      className="w-full p-2 border rounded-md bg-secondary"
-                      value={selectedAudioOutputDeviceId || ''}
-                      onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}
-                    >
-                      {availableAudioOutputDevices.map(device => (
-                        <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="pt-2 pb-2 -mx-2 px-4 space-y-3 bg-secondary/20 rounded-lg">
-                    <label className="text-sm font-bold text-gray-300 flex items-center gap-2">
-                      <Mic className="w-4 h-4 text-blue-400"/> 오디오 보정 (효과 적용 시 마이크 껐다 켜기)
-                    </label>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-gray-400 flex items-center gap-2">
-                        <span>잡음 제거 (Noise Suppression)</span>
-                      </span>
-                      <input
-                        type="checkbox"
-                        className="w-4 h-4 cursor-pointer accent-blue-500"
-                        checked={noiseSuppression}
-                        onChange={(e) => setNoiseSuppression(e.target.checked)}
-                      />
+                  <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                    <div className="mb-3 flex items-center gap-2 text-sm font-bold">
+                      <Settings className="h-4 w-4 text-blue-300" />
+                      장치
                     </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-gray-400 flex items-center gap-2">
-                        <span>에코 무시 (Echo Cancellation)</span>
-                      </span>
-                      <input
-                        type="checkbox"
-                        className="w-4 h-4 cursor-pointer accent-blue-500"
-                        checked={echoCancellation}
-                        onChange={(e) => setEchoCancellation(e.target.checked)}
-                      />
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <label className="space-y-1.5 text-xs text-white/55">
+                        카메라
+                        <select className="w-full rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-white" value={selectedVideoDeviceId || ''} onChange={(e) => setSelectedVideoDeviceId(e.target.value)}>
+                          {availableVideoDevices.map(device => (
+                            <option key={device.deviceId} value={device.deviceId}>{device.label || `Camera ${device.deviceId}`}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-1.5 text-xs text-white/55">
+                        마이크
+                        <select className="w-full rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-white" value={selectedAudioInputDeviceId || ''} onChange={(e) => setSelectedAudioInputDeviceId(e.target.value)}>
+                          {availableAudioInputDevices.map(device => (
+                            <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${device.deviceId}`}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-1.5 text-xs text-white/55">
+                        스피커
+                        <select className="w-full rounded-lg border border-white/10 bg-black/30 p-2 text-sm text-white" value={selectedAudioOutputDeviceId || ''} onChange={(e) => setSelectedAudioOutputDeviceId(e.target.value)}>
+                          {availableAudioOutputDevices.map(device => (
+                            <option key={device.deviceId} value={device.deviceId}>{device.label || `Speaker ${device.deviceId}`}</option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
-                  </div>
+                  </section>
 
-                  <div className="w-full flex items-center space-x-2 pt-2">
-                    <span title="Mic Volume">🎤</span>
-                    <input
-                      type="range" min="0" max="3" step="0.1" value={micVolume}
-                      onChange={(e) => setMicVolume(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
-                    />
-                    <span className="text-xs w-8 text-right">{(micVolume * 100).toFixed(0)}%</span>
-                  </div>
+                  <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                    <div className="mb-3 flex items-center gap-2 text-sm font-bold">
+                      <Volume2 className="h-4 w-4 text-indigo-300" />
+                      오디오
+                    </div>
+                    <div className="space-y-4">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <label className="flex items-center justify-between rounded-lg bg-black/25 px-3 py-2 text-sm">
+                          잡음 제거
+                          <input type="checkbox" className="h-4 w-4 accent-blue-500" checked={noiseSuppression} onChange={(e) => setNoiseSuppression(e.target.checked)} />
+                        </label>
+                        <label className="flex items-center justify-between rounded-lg bg-black/25 px-3 py-2 text-sm">
+                          에코 제거
+                          <input type="checkbox" className="h-4 w-4 accent-blue-500" checked={echoCancellation} onChange={(e) => setEchoCancellation(e.target.checked)} />
+                        </label>
+                      </div>
 
-                  <div className="w-full flex items-center space-x-2 pt-2">
-                    <span title="Speaker Volume">🔊</span>
-                    <input
-                      type="range" min="0" max="1" step="0.05" value={volume}
-                      onChange={(e) => setVolume(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-muted-foreground rounded-lg appearance-none cursor-pointer"
-                    />
-                    <span className="text-xs w-8 text-right">{(volume * 100).toFixed(0)}%</span>
-                  </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <label className="space-y-2 text-xs text-white/55">
+                          마이크 볼륨 <span className="font-mono text-white/70">{(micVolume * 100).toFixed(0)}%</span>
+                          <input type="range" min="0" max="3" step="0.1" value={micVolume} onChange={(e) => setMicVolume(parseFloat(e.target.value))} className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/20 accent-blue-400" />
+                        </label>
+                        <label className="space-y-2 text-xs text-white/55">
+                          스피커 볼륨 <span className="font-mono text-white/70">{(volume * 100).toFixed(0)}%</span>
+                          <input type="range" min="0" max="1" step="0.05" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/20 accent-blue-400" />
+                        </label>
+                      </div>
+                    </div>
+                  </section>
 
-                  <div className="flex items-center justify-between pt-4 border-t">
-                    <span className="text-sm font-medium">Exit Immediately</span>
-                    <input
-                      type="checkbox"
-                      className="w-5 h-5"
-                      checked={exitImmediately}
-                      onChange={handleExitImmediatelyChange}
-                    />
-                  </div>
+                  <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-bold">나가기 확인 생략</div>
+                        <div className="mt-1 text-xs text-white/50">종료 버튼을 누르면 바로 회의방을 나갑니다.</div>
+                      </div>
+                      <input type="checkbox" className="h-5 w-5 accent-blue-500" checked={exitImmediately} onChange={handleExitImmediatelyChange} />
+                    </div>
+                  </section>
 
-                  {/* ⏱️ AI Subtitle Latency Stats (for demo presentation) */}
+                  {isHost && (
+                    <section className="rounded-xl border border-red-400/20 bg-red-500/[0.08] p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2 text-sm font-bold text-red-100">
+                            <Trash2 className="h-4 w-4 text-red-300" />
+                            종료 시 회의방 삭제
+                          </div>
+                          <div className="mt-1 text-xs text-red-100/60">
+                            방장이 종료 버튼을 누르면 참가자를 내보내고 회의방 DB 기록을 삭제합니다.
+                          </div>
+                        </div>
+                        <input type="checkbox" className="h-5 w-5 accent-red-500" checked={deleteRoomOnHostEnd} onChange={handleDeleteRoomOnHostEndChange} />
+                      </div>
+                    </section>
+                  )}
+
                   {latencyHistory.length > 0 && (
-                    <div className="pt-4 border-t space-y-3">
+                    <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
                       <div className="flex items-center justify-between">
-                        <span className="text-sm font-bold">⚡ AI 자막 지연시간 통계</span>
+                        <span className="flex items-center gap-2 text-sm font-bold">
+                          <Activity className="h-4 w-4 text-emerald-300" />
+                          자막 지연시간
+                        </span>
                         <button
-                          className="text-xs text-muted-foreground hover:text-red-400 transition-colors"
+                          className="text-xs text-white/50 transition-colors hover:text-red-300"
                           onClick={() => setLatencyHistory([])}
                         >
                           초기화
                         </button>
                       </div>
 
-                      {/* Stats Grid */}
-                      <div className="grid grid-cols-3 gap-2">
-                        <div className="bg-secondary/60 rounded-lg p-2 text-center">
+                      <div className="mt-3 grid grid-cols-3 gap-2">
+                        <div className="rounded-lg bg-black/25 p-2 text-center">
                           <div className="text-lg font-bold text-green-400">
                             {Math.round(latencyHistory.reduce((a, b) => a + b, 0) / latencyHistory.length)}ms
                           </div>
-                          <div className="text-[10px] text-muted-foreground">평균</div>
+                          <div className="text-[10px] text-white/45">평균</div>
                         </div>
-                        <div className="bg-secondary/60 rounded-lg p-2 text-center">
+                        <div className="rounded-lg bg-black/25 p-2 text-center">
                           <div className="text-lg font-bold text-blue-400">
                             {Math.min(...latencyHistory)}ms
                           </div>
-                          <div className="text-[10px] text-muted-foreground">최소</div>
+                          <div className="text-[10px] text-white/45">최소</div>
                         </div>
-                        <div className="bg-secondary/60 rounded-lg p-2 text-center">
+                        <div className="rounded-lg bg-black/25 p-2 text-center">
                           <div className="text-lg font-bold text-orange-400">
                             {Math.max(...latencyHistory)}ms
                           </div>
-                          <div className="text-[10px] text-muted-foreground">최대</div>
+                          <div className="text-[10px] text-white/45">최대</div>
                         </div>
                       </div>
 
-                      {/* Mini Bar Chart */}
-                      <div className="flex items-end gap-0.5 h-10 bg-secondary/30 rounded p-1">
+                      <div className="mt-3 flex h-10 items-end gap-0.5 rounded bg-black/25 p-1">
                         {latencyHistory.slice(-20).map((ms, i) => {
                           const maxMs = Math.max(...latencyHistory);
                           const heightPct = Math.max(10, (ms / maxMs) * 100);
@@ -2853,15 +3115,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                           );
                         })}
                       </div>
-                      <div className="flex justify-between text-[10px] text-muted-foreground">
+                      <div className="mt-2 flex justify-between text-[10px] text-white/45">
                         <span>최근 {latencyHistory.length}회 측정</span>
-                        <span>🟢 &lt;1s 🟡 1~2s 🔴 &gt;2s</span>
+                        <span>&lt;1s / 1~2s / &gt;2s</span>
                       </div>
-                    </div>
+                    </section>
                   )}
 
-                  <Button className="w-full mt-4" onClick={copyLink}>
-                    {isLinkCopied ? 'Link Copied!' : 'Copy Meeting Link'}
+                  <Button className="mt-1 w-full gap-2 rounded-xl" onClick={copyLink}>
+                    {isLinkCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    {isLinkCopied ? '링크 복사됨' : '회의 링크 복사'}
                   </Button>
                 </div>
               </div>
@@ -2872,13 +3135,34 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         {/* End Call Modal */}
         {
           showEndCallModal && (
-            <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
-              <div className="bg-card p-6 rounded-xl shadow-2xl max-w-sm w-full mx-4 border">
-                <h3 className="text-lg font-bold mb-2">Leave Meeting?</h3>
-                <p className="text-muted-foreground mb-6">Are you sure you want to leave this meeting?</p>
-                <div className="flex justify-end space-x-3">
-                  <Button variant="outline" onClick={() => setShowEndCallModal(false)}>Cancel</Button>
-                  <Button variant="destructive" onClick={leaveRoom}>Leave Meeting</Button>
+            <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center" onClick={(event) => event.stopPropagation()}>
+              <div
+                role="alertdialog"
+                aria-modal="true"
+                aria-labelledby="end-call-title"
+                aria-describedby="end-call-description"
+                className="bg-card p-6 rounded-xl shadow-2xl max-w-sm w-full mx-4 border"
+              >
+                <h3 id="end-call-title" className="text-lg font-bold mb-2">
+                  {isHost && deleteRoomOnHostEnd ? '회의방을 삭제하고 종료할까요?' : '회의를 나갈까요?'}
+                </h3>
+                <p id="end-call-description" className="text-muted-foreground mb-6">
+                  {isHost && deleteRoomOnHostEnd
+                    ? '모든 참가자가 내보내지고 이 회의방은 다시 참여할 수 없게 됩니다.'
+                    : '현재 회의방에서 나갑니다. 다시 참여하려면 회의 링크가 필요합니다.'}
+                </p>
+                <div className="flex flex-wrap justify-end gap-3">
+                  <Button variant="outline" onClick={() => setShowEndCallModal(false)} disabled={isEndingMeeting}>취소</Button>
+                  {isHost && deleteRoomOnHostEnd && (
+                    <Button variant="secondary" onClick={leaveRoom} disabled={isEndingMeeting}>나만 나가기</Button>
+                  )}
+                  <Button
+                    variant="destructive"
+                    onClick={isHost && deleteRoomOnHostEnd ? () => void endMeetingAndDeleteRoom() : leaveRoom}
+                    disabled={isEndingMeeting}
+                  >
+                    {isEndingMeeting ? '종료 중...' : isHost && deleteRoomOnHostEnd ? '방 삭제하고 종료' : '나가기'}
+                  </Button>
                 </div>
               </div>
             </div>

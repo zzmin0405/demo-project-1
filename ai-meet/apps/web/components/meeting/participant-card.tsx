@@ -83,8 +83,8 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
 
     return (
         <div className={cn(
-            "relative group bg-muted rounded-lg overflow-hidden border border-border shadow-sm transition-all",
-            isSpeaking && "ring-4 ring-green-500 border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.5)]",
+            "relative group overflow-hidden rounded-xl border border-white/10 bg-zinc-950 shadow-sm transition-all",
+            isSpeaking && "ring-2 ring-emerald-400 border-emerald-400 shadow-[0_0_22px_rgba(52,211,153,0.32)]",
             className
         )}>
             {/* Video / Avatar Area */}
@@ -129,22 +129,56 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                 ))}
             </div>
 
-            <div className="absolute top-2 left-2 z-30 flex items-center gap-2">
+            <div className="absolute left-2 top-2 z-30 flex items-center gap-2">
                 {participant.canBroadcast && (
-                    <div className="h-8 rounded-md bg-emerald-500/90 px-3 text-xs font-semibold text-white shadow-lg backdrop-blur-sm flex items-center gap-1.5">
+                    <div className="flex h-7 items-center gap-1.5 rounded-full bg-emerald-500/95 px-2.5 text-[11px] font-semibold text-white shadow-lg shadow-emerald-950/30 backdrop-blur-sm">
                         <Radio className="h-3.5 w-3.5" />
                         화자
                     </div>
                 )}
+            </div>
+
+            <div className="absolute right-2 top-2 z-30 flex items-center gap-2 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
+                {!isLocal && (
+                    <Button
+                        size="icon"
+                        variant={isPinned ? "default" : "secondary"}
+                        className="h-8 w-8 rounded-full border-0 bg-black/55 text-white shadow-md backdrop-blur-sm hover:bg-black/75"
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            onPin?.(participant.userId);
+                        }}
+                        title={isPinned ? "고정 해제" : "고정"}
+                    >
+                        {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                    </Button>
+                )}
+            </div>
+
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 bg-gradient-to-t from-black/75 via-black/35 to-transparent p-2 pt-12">
+                <div className="flex items-end justify-between gap-2">
+                    <div className="min-w-0 rounded-lg bg-black/45 px-2.5 py-1.5 text-xs font-medium text-white shadow-sm backdrop-blur-sm md:text-sm">
+                        <div className="flex items-center gap-2">
+                            <span className="truncate">
+                                {participant.username} {isLocal && "(나)"}
+                            </span>
+                            {(isLocal ? isMuted : participant.isMuted) ? (
+                                <MicOff className="h-3.5 w-3.5 shrink-0 text-red-300" />
+                            ) : (
+                                <Mic className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
+                            )}
+                        </div>
+                    </div>
+
                 {speakerAction && (
                     <Button
                         size="sm"
                         variant={speakerAction === 'revoke' ? 'destructive' : 'secondary'}
                         className={cn(
-                            "h-8 rounded-md px-3 text-xs font-semibold shadow-lg",
+                            "pointer-events-auto h-8 shrink-0 rounded-full px-3 text-[11px] font-semibold shadow-lg",
                             speakerAction === 'make'
-                                ? "bg-white/90 text-black hover:bg-white"
-                                : "bg-red-500/90 text-white hover:bg-red-500"
+                                ? "bg-white/95 text-zinc-950 hover:bg-white"
+                                : "bg-red-500/95 text-white hover:bg-red-500"
                         )}
                         onClick={(event) => {
                             event.stopPropagation();
@@ -154,37 +188,7 @@ export const ParticipantCard: React.FC<ParticipantCardProps> = ({
                         {speakerActionLabel ?? (speakerAction === 'make' ? '화자 권한 주기' : '화자 권한 뺐기')}
                     </Button>
                 )}
-            </div>
-
-            {/* Name Tag & Status Icons */}
-            <div className="absolute bottom-2 left-2 max-w-[calc(100%-1rem)] rounded-md bg-black/65 px-2.5 py-1.5 text-xs md:text-sm text-white font-medium backdrop-blur-sm flex items-center gap-2">
-                <span className="truncate">
-                    {participant.username} {isLocal && "(You)"}
-                </span>
-                {/* Mute Status Icon */}
-                {(isLocal ? isMuted : participant.isMuted) ? (
-                    <MicOff className="w-3 h-3 text-red-400" />
-                ) : (
-                    <Mic className="w-3 h-3 text-green-400" />
-                )}
-            </div>
-
-            {/* Hover Controls Overlay */}
-            <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2">
-                {!isLocal && (
-                    <Button
-                        size="icon"
-                        variant={isPinned ? "default" : "secondary"}
-                        className="rounded-full w-8 h-8 bg-black/60 hover:bg-black/80 text-white border-0 backdrop-blur-sm shadow-md"
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            onPin?.(participant.userId);
-                        }}
-                        title={isPinned ? "Unpin" : "Pin"}
-                    >
-                        {isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
-                    </Button>
-                )}
+                </div>
             </div>
         </div>
     );
