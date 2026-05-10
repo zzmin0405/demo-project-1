@@ -9,17 +9,62 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
-import { Trash2, Video, Calendar, Users } from 'lucide-react';
+import { Trash2, Video, Calendar, Users, FileText } from 'lucide-react';
 import { format } from 'date-fns';
 
 interface Meeting {
   id: string;
   title: string;
   createdAt: string;
+  summaries?: {
+    id: string;
+    content: string;
+    createdAt: string;
+  }[];
+  sttTranscriptLogs?: {
+    id: string;
+    originalText: string;
+    ko: string;
+    en: string;
+    ja: string;
+    zh: string;
+    capturedAt: string;
+    user: {
+      name: string | null;
+      email: string | null;
+    };
+  }[];
   _count: {
     participants: number;
   };
 }
+
+const demoSummary = [
+  '1. 핵심 요약',
+  '실시간 다국어 회의 기능의 안정화 방향과 최종 발표 시연 흐름을 논의하였다.',
+  '',
+  '2. 주요 논의 내용',
+  '- 화자 중심 브로드캐스트로 불필요한 송출을 줄인다.',
+  '- STT 결과를 번역 자막과 회의 요약에 활용한다.',
+  '',
+  '3. 할 일',
+  '- 발표 전 도메인 접속과 2명 이상 리허설을 진행한다.',
+].join('\n');
+
+const demoTranscriptLogs = [
+  {
+    id: 'demo-stt-1',
+    originalText: '이번 발표에서는 단일 화자 모드와 번역 자막 기능을 먼저 보여주겠습니다.',
+    capturedAt: new Date('2026-05-10T10:01:00.000Z').toISOString(),
+    user: { name: '발표자', email: null },
+  },
+  {
+    id: 'demo-stt-2',
+    originalText: '참가자는 송출하지 않고 자막과 번역 결과만 수신하는 구조입니다.',
+    capturedAt: new Date('2026-05-10T10:02:00.000Z').toISOString(),
+    user: { name: '참가자', email: null },
+  },
+];
 
 export default function MyPage() {
   const { data: session, status, update } = useSession();
@@ -267,6 +312,52 @@ export default function MyPage() {
                     <div className="flex items-center gap-2">
                       <Users className="w-4 h-4" />
                       참여자 {meeting._count.participants}명 (누적)
+                    </div>
+                  </div>
+                  <div className="mt-3 rounded-lg border bg-muted/35 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                        <FileText className="h-3.5 w-3.5 text-primary" />
+                        회의 요약
+                      </div>
+                      {!meeting.summaries?.[0] && (
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                          예시
+                        </span>
+                      )}
+                    </div>
+                    <p className="line-clamp-5 whitespace-pre-line text-xs leading-5 text-muted-foreground">
+                      {meeting.summaries?.[0]?.content || demoSummary}
+                    </p>
+                  </div>
+                  <div className="mt-3 rounded-lg border bg-muted/20 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                        <Users className="h-3.5 w-3.5 text-primary" />
+                        발화 기록
+                      </div>
+                      {!meeting.sttTranscriptLogs?.length && (
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                          예시
+                        </span>
+                      )}
+                    </div>
+                    <div className="space-y-2">
+                      {(meeting.sttTranscriptLogs?.length ? meeting.sttTranscriptLogs : demoTranscriptLogs).map((log) => (
+                        <div key={log.id} className="rounded-md bg-background/70 px-2.5 py-2">
+                          <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                            <span className="truncate font-medium text-foreground">
+                              {log.user.name || log.user.email || '알 수 없음'}
+                            </span>
+                            <span className="shrink-0">
+                              {format(new Date(log.capturedAt), 'MM-dd HH:mm')}
+                            </span>
+                          </div>
+                          <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                            {log.originalText}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </CardContent>

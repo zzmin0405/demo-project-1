@@ -73,7 +73,17 @@ export async function GET(
         if (!room) {
             return NextResponse.json({ error: 'Room not found' }, { status: 404 });
         }
-        if (room.creatorId !== user.id) {
+
+        const participant = await prisma.participant.findUnique({
+            where: {
+                userId_meetingRoomId: {
+                    userId: user.id,
+                    meetingRoomId: roomId,
+                },
+            },
+            select: { id: true },
+        });
+        if (room.creatorId !== user.id && !participant) {
             return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
         }
 

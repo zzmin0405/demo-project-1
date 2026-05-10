@@ -23,6 +23,22 @@ export async function GET() {
             where: { creatorId: user.id },
             orderBy: { createdAt: 'desc' },
             include: {
+                summaries: {
+                    orderBy: { createdAt: 'desc' },
+                    take: 1,
+                },
+                sttTranscriptLogs: {
+                    orderBy: { capturedAt: 'desc' },
+                    take: 5,
+                    include: {
+                        user: {
+                            select: {
+                                name: true,
+                                email: true,
+                            },
+                        },
+                    },
+                },
                 _count: {
                     select: {
                         participants: {

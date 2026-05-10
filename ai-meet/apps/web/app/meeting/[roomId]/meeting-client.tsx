@@ -10,7 +10,7 @@ import {
   Mic, MicOff, Video, VideoOff, MonitorUp, PhoneOff,
   MoreHorizontal, LayoutGrid, Maximize, Pin, PinOff,
   Users, MessageSquare, Settings, X, Send, ChevronUp, ChevronDown, Edit2, Trash2, Subtitles, Languages,
-  Radio, Crown, Check, Copy, Clock3, Activity, Volume2
+  Radio, Crown, Check, Copy, Clock3, Activity, Volume2, FileText, RefreshCw
 } from 'lucide-react';
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -31,6 +31,37 @@ interface Participant {
 type LayoutMode = 'speaker' | 'grid';
 type SttProvider = 'browser' | 'deepgram';
 type BroadcastMode = 'single' | 'all';
+
+type MeetingSummary = {
+  id: string;
+  content: string;
+  createdAt: string;
+  isDemo?: boolean;
+};
+
+const DEMO_MEETING_SUMMARY: MeetingSummary = {
+  id: 'demo-summary',
+  createdAt: new Date('2026-05-10T10:00:00.000Z').toISOString(),
+  isDemo: true,
+  content: [
+    '1. 핵심 요약',
+    '실시간 다국어 회의 기능의 안정화 방향을 논의했으며, 화자 중심 브로드캐스트와 번역 자막 기능을 최종 발표 시연 흐름에 포함하기로 했다.',
+    '',
+    '2. 주요 논의 내용',
+    '- 방장 또는 지정된 화자만 영상과 음성을 송출하여 불필요한 업로드를 줄인다.',
+    '- STT 결과를 서버에서 번역하고, 참가자가 선택한 언어 자막만 표시한다.',
+    '- 최종 자막 기록을 DB에 저장하고 회의 종료 후 요약 기능에 활용한다.',
+    '',
+    '3. 결정 사항',
+    '- 발표 시 단일 화자 모드, 전체 화자 모드, 번역 자막, 회의 요약을 순서대로 시연한다.',
+    '',
+    '4. 할 일',
+    '- 발표 전 2명 이상 접속 테스트와 도메인 접속 테스트를 진행한다.',
+    '',
+    '5. 미해결 질문',
+    '- 장시간 회의에서 지연시간이 누적되는지 추가 확인이 필요하다.',
+  ].join('\n'),
+};
 
 export interface SubtitleData {
   id: string;
@@ -123,6 +154,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [chatMessages, setChatMessages] = useState<{ userId: string; username: string; message: string; timestamp: string; avatar_url?: string }[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const [meetingSummaries, setMeetingSummaries] = useState<MeetingSummary[]>([]);
+  const [isSummaryLoading, setIsSummaryLoading] = useState(false);
+  const [isSummaryGenerating, setIsSummaryGenerating] = useState(false);
+  const [summaryError, setSummaryError] = useState('');
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -213,6 +248,30 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
   }, [chatMessages, showChatPanel]);
+
+  const loadMeetingSummaries = useCallback(async () => {
+    if (status !== 'authenticated') return;
+    setIsSummaryLoading(true);
+    setSummaryError('');
+
+    try {
+      const response = await fetch(`/api/meeting/${roomId}/summary`);
+      if (!response.ok) throw new Error('회의 요약을 불러오지 못했습니다.');
+      const data = await response.json();
+      setMeetingSummaries(Array.isArray(data.summaries) ? data.summaries : []);
+    } catch (error) {
+      console.error('Failed to load meeting summaries:', error);
+      setMeetingSummaries([]);
+      setSummaryError('저장된 요약을 불러오지 못해 예시 요약을 표시합니다.');
+    } finally {
+      setIsSummaryLoading(false);
+    }
+  }, [roomId, status]);
+
+  useEffect(() => {
+    if (!showMorePanel) return;
+    loadMeetingSummaries();
+  }, [showMorePanel, loadMeetingSummaries]);
 
 
 
@@ -2059,6 +2118,29 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
   };
 
+  const generateMeetingSummary = async () => {
+    if (!isHost || isSummaryGenerating) return;
+    setIsSummaryGenerating(true);
+    setSummaryError('');
+
+    try {
+      const response = await fetch(`/api/meeting/${roomId}/summary`, {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || '회의 요약 생성에 실패했습니다.');
+      }
+      await loadMeetingSummaries();
+      showSystemNotice('회의 요약을 생성했습니다.');
+    } catch (error) {
+      console.error('Failed to generate meeting summary:', error);
+      setSummaryError(error instanceof Error ? error.message : '회의 요약 생성에 실패했습니다.');
+    } finally {
+      setIsSummaryGenerating(false);
+    }
+  };
+
   const revokeBroadcastPresenter = (targetUserId: string) => {
     if (!isHost || !socketRef.current?.connected || targetUserId === currentUserId) return;
     setBroadcastPresenter(currentUserId);
@@ -2278,6 +2360,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     ja: '일본어',
     zh: '중국어',
   };
+  const visibleSummary = meetingSummaries[0] || DEMO_MEETING_SUMMARY;
+  const visibleSummaryCreatedAt = new Date(visibleSummary.createdAt).toLocaleString('ko-KR', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 
   return (
     <div
@@ -2973,6 +3062,57 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                       </div>
                     </section>
                   )}
+
+                  <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                      <div>
+                        <div className="flex items-center gap-2 text-sm font-bold">
+                          <FileText className="h-4 w-4 text-cyan-300" />
+                          회의 요약
+                          {visibleSummary.isDemo && (
+                            <span className="rounded-full border border-cyan-300/25 bg-cyan-300/10 px-2 py-0.5 text-[10px] font-semibold text-cyan-100">
+                              예시
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-1 text-xs text-white/50">
+                          {visibleSummary.isDemo
+                            ? '저장된 요약이 없을 때 표시되는 발표용 예시입니다.'
+                            : `${visibleSummaryCreatedAt} 생성됨`}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="gap-1 rounded-full"
+                          disabled={isSummaryLoading}
+                          onClick={loadMeetingSummaries}
+                        >
+                          <RefreshCw className={cn("h-3.5 w-3.5", isSummaryLoading && "animate-spin")} />
+                          새로고침
+                        </Button>
+                        {isHost && (
+                          <Button
+                            size="sm"
+                            className="rounded-full"
+                            disabled={isSummaryGenerating}
+                            onClick={generateMeetingSummary}
+                          >
+                            {isSummaryGenerating ? '생성 중...' : '요약 생성'}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    {summaryError && (
+                      <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs text-amber-100">
+                        {summaryError}
+                      </div>
+                    )}
+                    <div className="mt-3 max-h-64 overflow-y-auto rounded-xl border border-white/10 bg-black/25 p-3 text-xs leading-5 text-white/78 whitespace-pre-line">
+                      {visibleSummary.content}
+                    </div>
+                  </section>
 
                   <section className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
                     <div className="mb-3 flex items-center gap-2 text-sm font-bold">
