@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useSession } from 'next-auth/react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,12 +19,18 @@ import {
 
 export default function Home() {
   const router = useRouter();
+  const { status } = useSession();
   const [meetingId, setMeetingId] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const { dict, language, setLanguage } = useLanguage();
 
   const handleCreateMeetingClick = () => {
+    if (status !== 'authenticated') {
+      router.push('/login');
+      return;
+    }
+
     setIsModalOpen(true);
   };
 

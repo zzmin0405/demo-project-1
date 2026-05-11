@@ -54,7 +54,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  private readonly subtitleTranslateTimeoutMs = 2400;
+  private readonly subtitleTranslateTimeoutMs = 2900;
   private readonly subtitleCacheLimit = 300;
   private readonly subtitleTranslationCache = new Map<string, TranslationMap>();
   private readonly activeSubtitleSessions = new Map<string, { id: string; sequence: number }>();
@@ -85,6 +85,31 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       presenterUserId: this.broadcastPresenterByRoom.get(roomId),
       broadcastMode: this.broadcastModeByRoom.get(roomId) ?? 'single',
     });
+  }
+
+  private removeExistingSocketsForUser(userId: string, nextSocketId: string): void {
+    for (const [roomId, users] of this.roomToUsers.entries()) {
+      for (const [socketId, participant] of Array.from(users.entries())) {
+        if (participant.userId !== userId || socketId === nextSocketId) continue;
+
+        console.log(`[Auto-Kick] Removing duplicate socket ${socketId} for user ${userId} in room ${roomId}`);
+        users.delete(socketId);
+        const oldSocket = this.server.sockets.sockets.get(socketId);
+        if (oldSocket) {
+          oldSocket.leave(roomId);
+          oldSocket.disconnect(true);
+        }
+      }
+
+      if (users.size === 0) {
+        this.roomToUsers.delete(roomId);
+        this.broadcastPresenterByRoom.delete(roomId);
+        this.broadcastModeByRoom.delete(roomId);
+        this.sttSavingByRoom.delete(roomId);
+      } else {
+        this.emitParticipantListChanged(roomId);
+      }
+    }
   }
 
   handleConnection(client: Socket, ...args: any[]) {
@@ -304,39 +329,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
 
-    // Single Meeting Enforcement with Auto-Kick
-    const existingRoomId = this.userIdToRoom.get(userId);
-    if (existingRoomId) {
-      console.log(`User ${userId} is already in room ${existingRoomId}. Checking for stale sockets...`);
-
-      const existingRoom = this.roomToUsers.get(existingRoomId);
-      if (existingRoom) {
-        for (const [oldSocketId, participant] of existingRoom.entries()) {
-          if (participant.userId === userId) {
-            // If it's the SAME socket, ignore (re-join)
-            if (oldSocketId === client.id) continue;
-
-            console.log(`[Auto-Kick] Found stale socket ${oldSocketId} for user ${userId} in room ${existingRoomId}. Cleaning up silently.`);
-
-            const oldSocket = this.server.sockets.sockets.get(oldSocketId);
-            if (oldSocket) {
-              this.leaveRoom(oldSocket, true); // Silent leave to prevent user-left race condition
-              oldSocket.disconnect(true); // Disconnect without error - this is normal reconnection behavior
-            } else {
-              // Manually cleanup if socket object is gone
-              existingRoom.delete(oldSocketId);
-              if (existingRoom.size === 0) this.roomToUsers.delete(existingRoomId);
-              // Don't delete userIdToRoom yet if we are staying in the same room
-            }
-          }
-        }
-      }
-
-      // If switching rooms, update mapping
-      if (existingRoomId !== roomId) {
-        this.userIdToRoom.delete(userId);
-      }
-    }
+    this.removeExistingSocketsForUser(userId, client.id);
+    this.userIdToRoom.delete(userId);
 
     console.log(`Authenticated client ${client.id} (userId: ${userId}) attempting to join room ${roomId}`);
 
@@ -418,6 +412,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     client.emit('room-state', {
       roomId,
+      currentUserId: userId,
       participants: otherUsers,
       title: roomInfo?.title || 'Untitled Meeting',
       hostId: roomInfo?.creatorId,
@@ -809,29 +804,33 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       console.log(`[Translate] ✅ (${sourceLang || 'auto'}) "${text}" → KO: "${translations.ko}" | EN: "${translations.en}" | JA: "${translations.ja}" | ZH: "${translations.zh}"`);
 
       const latestSession = this.activeSubtitleSessions.get(sessionKey);
-      if (!latestSession || latestSession.id !== subtitleId || latestSession.sequence !== sequence) {
+      if (!latestSession || latestSession.id !== subtitleId) {
         return;
       }
+      const isLatestSequence = latestSession.sequence === sequence;
 
       const translationFinishedAt = Date.now();
       const broadcastPayload = {
         id: subtitleId, userId, userName,
-        originalText: text,
+        ...(isLatestSequence ? { originalText: text, sequence, isFinal } : {}),
         sourceLang,
-        sequence,
-        isFinal,
         ...translations,
         clientTimestamp,
         serverReceivedAt,
         translationStartedAt,
         translationFinishedAt,
       };
-      this.server.to(roomId).emit(isFinal ? 'subtitle-broadcast' : 'subtitle-stream-update', {
+      this.server.to(roomId).emit(isFinal && isLatestSequence ? 'subtitle-broadcast' : 'subtitle-stream-update', {
         ...broadcastPayload,
       });
 
-      if (isFinal) {
-        void this.saveSttTranscriptIfEnabled(roomId, userId, broadcastPayload);
+      if (isFinal && isLatestSequence) {
+        void this.saveSttTranscriptIfEnabled(roomId, userId, {
+          originalText: text,
+          sourceLang,
+          sequence,
+          ...translations,
+        });
         this.activeSubtitleSessions.delete(sessionKey);
       }
 
@@ -1087,8 +1086,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
           where: { id: roomId },
           select: { isSttSaved: true },
         });
-        isSttSaved = meetingRoom?.isSttSaved ?? false;
-        this.sttSavingByRoom.set(roomId, isSttSaved);
+        const savedSetting = meetingRoom?.isSttSaved ?? false;
+        isSttSaved = savedSetting;
+        this.sttSavingByRoom.set(roomId, savedSetting);
       }
 
       if (!isSttSaved) return;

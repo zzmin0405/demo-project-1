@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import type { Prisma } from '@prisma/client';
 
 const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
 const MAX_SOURCE_CHARS = 30000;
@@ -10,6 +11,14 @@ type TimelineItem = {
     at: Date;
     text: string;
 };
+
+type ChatLogWithUser = Prisma.ChatLogGetPayload<{
+    include: { user: { select: { name: true; email: true } } };
+}>;
+
+type SttTranscriptLogWithUser = Prisma.SttTranscriptLogGetPayload<{
+    include: { user: { select: { name: true; email: true } } };
+}>;
 
 function extractResponseText(response: unknown): string {
     if (typeof response !== 'object' || response === null) return '';
@@ -149,11 +158,11 @@ export async function POST(
         ]);
 
         const timeline: TimelineItem[] = [
-            ...chatLogs.map((log) => ({
+            ...chatLogs.map((log: ChatLogWithUser) => ({
                 at: log.createdAt,
                 text: `채팅 / ${log.user.name || log.user.email || 'Unknown'}: ${log.content}`,
             })),
-            ...sttLogs.map((log) => ({
+            ...sttLogs.map((log: SttTranscriptLogWithUser) => ({
                 at: log.capturedAt,
                 text: `STT / ${log.user.name || log.user.email || 'Unknown'}: ${log.originalText}`,
             })),

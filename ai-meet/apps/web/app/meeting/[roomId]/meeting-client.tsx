@@ -87,7 +87,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const router = useRouter();
   const { data: session, status } = useSession();
 
-  const currentUserId = session?.user?.id || session?.user?.email || 'initializing';
+  const sessionUserId = session?.user?.id || session?.user?.email || 'initializing';
+  const [canonicalUserId, setCanonicalUserId] = useState('');
+  const currentUserId = canonicalUserId || sessionUserId;
+  const currentUserIdRef = useRef(currentUserId);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localVideoOn, setLocalVideoOn] = useState(false);
@@ -149,6 +152,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   const socketRef = useRef<Socket | null>(null);
 
+  useEffect(() => {
+    currentUserIdRef.current = currentUserId;
+  }, [currentUserId]);
+
   // Chat State
   const [showChatPanel, setShowChatPanel] = useState(false);
   const [chatMessages, setChatMessages] = useState<{ userId: string; username: string; message: string; timestamp: string; avatar_url?: string }[]>([]);
@@ -158,6 +165,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [isSummaryLoading, setIsSummaryLoading] = useState(false);
   const [isSummaryGenerating, setIsSummaryGenerating] = useState(false);
   const [summaryError, setSummaryError] = useState('');
+  const subtitleRemovalTimersRef = useRef<Record<string, NodeJS.Timeout>>({});
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -183,6 +191,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const remoteLatencyIntervalsRef = useRef<{ [socketId: string]: NodeJS.Timeout }>({});
   const remoteVideosAwaitingUserGestureRef = useRef<Set<HTMLVideoElement>>(new Set());
   const hasUserInteractedRef = useRef(false);
+
+  const scheduleSubtitleRemoval = useCallback((subtitleId: string, delayMs: number) => {
+    const existingTimer = subtitleRemovalTimersRef.current[subtitleId];
+    if (existingTimer) clearTimeout(existingTimer);
+
+    subtitleRemovalTimersRef.current[subtitleId] = setTimeout(() => {
+      setSubtitles(prev => prev.filter(s => s.id !== subtitleId));
+      delete subtitleRemovalTimersRef.current[subtitleId];
+    }, delayMs);
+  }, []);
 
   const [isLinkCopied, setIsLinkCopied] = useState(false);
   const [systemNotice, setSystemNotice] = useState('');
@@ -324,15 +342,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
          let lastInterimText = '';
          let lastSentText = ''; // Prevent duplicate sends
          let lastInterimSentAt = 0;
+         let committedTranscript = '';
+         let segmentStartedAt = 0;
          let sttSequence = 0;
+         const subtitleSegmentMs = 1800;
 
          const emitSttText = (text: string, isFinal: boolean) => {
             if (!isBroadcastPresenterRef.current || !text || !socketRef.current) return;
+            const normalizedText = text.trim();
+            if (!normalizedText) return;
             sttSequence += 1;
-            lastSentText = text;
+            lastSentText = normalizedText;
             socketRef.current.emit('stt-recognize', {
               roomId,
-              text,
+              text: normalizedText,
               isFinal,
               sequence: sttSequence,
               sourceLang: sttLangRef.current,
@@ -340,29 +363,61 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             });
          };
 
+         const getPendingTranscriptSegment = (transcript: string) => {
+            const normalizedTranscript = transcript.trim();
+            if (!normalizedTranscript) return '';
+            if (committedTranscript && normalizedTranscript.startsWith(committedTranscript)) {
+              return normalizedTranscript.slice(committedTranscript.length).trim();
+            }
+            if (committedTranscript && committedTranscript.startsWith(normalizedTranscript)) {
+              return '';
+            }
+            committedTranscript = '';
+            return normalizedTranscript;
+         };
+
          recognition.onresult = (event: any) => {
+            if (isMutedRef.current || !isBroadcastPresenterRef.current || sttProviderRef.current !== 'browser') {
+              return;
+            }
+
             for (let i = event.resultIndex; i < event.results.length; i++) {
               const transcript = event.results[i][0].transcript.trim();
 
               if (event.results[i].isFinal) {
                 // ✅ Final result arrived — send immediately and cancel any pending interim flush
                 if (interimFlushTimer) { clearTimeout(interimFlushTimer); interimFlushTimer = null; }
-                if (transcript && transcript !== lastSentText && socketRef.current) {
-                    console.log("[STT] Final:", transcript);
-                    emitSttText(transcript, true);
-                } else if (transcript && socketRef.current) {
-                    emitSttText(transcript, true);
+                const pendingSegment = getPendingTranscriptSegment(transcript);
+                if (pendingSegment && socketRef.current) {
+                    console.log("[STT] Final segment:", pendingSegment);
+                    emitSttText(pendingSegment, true);
                 }
+                committedTranscript = '';
+                segmentStartedAt = 0;
                 lastInterimText = '';
               } else {
                 // ⏱️ Interim result — throttle updates so captions feel live without flooding translation.
-                lastInterimText = transcript;
+                const pendingSegment = getPendingTranscriptSegment(transcript);
+                if (!pendingSegment) continue;
+
+                lastInterimText = pendingSegment;
                 const now = Date.now();
-                const hasMeaningfulChange = transcript.length >= 3 && transcript !== lastSentText;
-                if (hasMeaningfulChange && now - lastInterimSentAt >= 700) {
-                  console.log("[STT] Interim stream:", transcript);
+                if (!segmentStartedAt) segmentStartedAt = now;
+
+                const shouldFinalizeSegment = now - segmentStartedAt >= subtitleSegmentMs;
+                const hasMeaningfulChange = pendingSegment.length >= 3 && pendingSegment !== lastSentText;
+
+                if (shouldFinalizeSegment && hasMeaningfulChange) {
+                  console.log("[STT] Timed segment:", pendingSegment);
+                  emitSttText(pendingSegment, true);
+                  committedTranscript = transcript;
+                  segmentStartedAt = now;
+                  lastInterimText = '';
+                  if (interimFlushTimer) { clearTimeout(interimFlushTimer); interimFlushTimer = null; }
+                } else if (hasMeaningfulChange && now - lastInterimSentAt >= 700) {
+                  console.log("[STT] Interim stream:", pendingSegment);
                   lastInterimSentAt = now;
-                  emitSttText(transcript, false);
+                  emitSttText(pendingSegment, false);
                 } else {
                   if (interimFlushTimer) clearTimeout(interimFlushTimer);
                   interimFlushTimer = setTimeout(() => {
@@ -386,7 +441,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             if (['network', 'aborted', 'service-not-allowed'].includes(event.error)) {
               if (restartTimeoutRef) clearTimeout(restartTimeoutRef);
               restartTimeoutRef = setTimeout(() => {
-                if (isSubtitlesEnabledRef.current) {
+                if (isSubtitlesEnabledRef.current && !isMutedRef.current && isBroadcastPresenterRef.current && sttProviderRef.current === 'browser') {
                   try { recognition.start(); } catch (e) {}
                 }
               }, 500);
@@ -396,10 +451,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
          recognition.onend = () => {
              // KEY FIX: Delay restart by 300ms to avoid race condition where browser
              // is still "stopping" and rejects the immediate start() call silently
-             if (isSubtitlesEnabledRef.current) {
+             if (isSubtitlesEnabledRef.current && !isMutedRef.current && isBroadcastPresenterRef.current && sttProviderRef.current === 'browser') {
                if (restartTimeoutRef) clearTimeout(restartTimeoutRef);
                restartTimeoutRef = setTimeout(() => {
-                 if (isSubtitlesEnabledRef.current) {
+                 if (isSubtitlesEnabledRef.current && !isMutedRef.current && isBroadcastPresenterRef.current && sttProviderRef.current === 'browser') {
                    try { recognition.start(); } catch (e) {}
                  }
                }, 300);
@@ -573,10 +628,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       console.log('Client: Connecting to WebSocket at', websocketUrl);
 
       socketRef.current = io(websocketUrl, {
-        transports: ['websocket', 'polling'], // Try websocket first, then polling
+        transports: ['polling', 'websocket'], // Start stable through tunnel, then upgrade to WebSocket.
         auth: {
-          token: currentUserId, // Use actual userId as token for SupabaseAuthGuard
-          userId: currentUserId
+          token: sessionUserId, // Server canonicalizes email tokens to the DB user id.
+          userId: sessionUserId
         },
         reconnection: true,
         reconnectionAttempts: Infinity,
@@ -587,14 +642,23 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       const socket = socketRef.current;
       const syncRemoteParticipants = (incomingParticipants: (Participant & { socketId: string })[]) => {
-        const filteredParticipants = incomingParticipants.filter(p => p.userId !== currentUserId);
+        const selfUserId = currentUserIdRef.current;
+        const participantsByUserId = new Map<string, Participant & { socketId: string }>();
+        incomingParticipants.forEach(participant => {
+          if (participant.userId === selfUserId) return;
+          const previous = participantsByUserId.get(participant.userId);
+          if (previous && previous.socketId !== participant.socketId) {
+            cleanupMediaSource(previous.socketId);
+            delete socketIdToUserIdMap.current[previous.socketId];
+          }
+          participantsByUserId.set(participant.userId, participant);
+        });
+        const filteredParticipants = Array.from(participantsByUserId.values());
         const activeRemoteUserIds = new Set(filteredParticipants.map(p => p.userId));
 
-        incomingParticipants.forEach(p => {
-          if (p.userId !== currentUserId) {
-            socketIdToUserIdMap.current[p.socketId] = p.userId;
-            userIdToSocketIdMap.current[p.userId] = p.socketId;
-          }
+        filteredParticipants.forEach(p => {
+          socketIdToUserIdMap.current[p.socketId] = p.userId;
+          userIdToSocketIdMap.current[p.userId] = p.socketId;
         });
 
         Object.entries(userIdToSocketIdMap.current).forEach(([userId, socketId]) => {
@@ -617,7 +681,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       socket.on('error', (err) => {
-        console.error(`[SocketDebug] Generic Error:`, err);
+        const message = err instanceof Error
+          ? err.message
+          : typeof err === 'string'
+            ? err
+            : err?.message || JSON.stringify(err);
+        console.error(`[SocketDebug] Generic Error: ${message}`, err);
       });
 
       socket.on('connect', () => {
@@ -653,15 +722,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         // Media capture starts after room-state confirms this socket is the presenter.
       });
 
-      socket.on('room-state', async (data: { participants: (Participant & { socketId: string })[], title?: string, hostId?: string, canBroadcast?: boolean; broadcastMode?: BroadcastMode; isSttSaved?: boolean }) => {
+      socket.on('room-state', async (data: { currentUserId?: string; participants: (Participant & { socketId: string })[], title?: string, hostId?: string, canBroadcast?: boolean; broadcastMode?: BroadcastMode; isSttSaved?: boolean }) => {
         console.log('Client: room-state received', data);
         const canBroadcast = Boolean(data.canBroadcast);
+        const selfUserId = data.currentUserId || currentUserIdRef.current;
+        if (data.currentUserId) {
+          currentUserIdRef.current = data.currentUserId;
+          setCanonicalUserId(data.currentUserId);
+        }
 
         if (data.title) setMeetingTitle(data.title);
         if (data.hostId) setHostId(data.hostId);
         if (data.broadcastMode) setBroadcastMode(data.broadcastMode);
         if (typeof data.isSttSaved === 'boolean') setIsSttSaved(data.isSttSaved);
-        setIsHost(Boolean(data.hostId && data.hostId === currentUserId));
+        setIsHost(Boolean(data.hostId && data.hostId === selfUserId));
 
         syncRemoteParticipants(data.participants);
         applyBroadcastPresenterState(canBroadcast);
@@ -669,7 +743,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       socket.on('user-joined', async (data: Participant & { socketId: string }) => {
         console.log(`Client: New user ${data.username} joined with socketId ${data.socketId}.`);
-        if (data.userId === currentUserId) return;
+        if (data.userId === currentUserIdRef.current) return;
 
         // Cleanup if user already exists (Ghost/Re-join)
         const oldSocketId = userIdToSocketIdMap.current[data.userId];
@@ -716,14 +790,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         setBroadcastMode(data.broadcastMode ?? 'single');
         syncRemoteParticipants(data.participants);
-        applyBroadcastPresenterState(data.presenterUserId === currentUserId);
+        applyBroadcastPresenterState(data.presenterUserId === currentUserIdRef.current);
       });
 
       socket.on('participant-list-changed', (data: { presenterUserId?: string; broadcastMode?: BroadcastMode; participants: (Participant & { socketId: string })[] }) => {
         console.log('[Participants] Participant list resynced', data);
         if (data.broadcastMode) setBroadcastMode(data.broadcastMode);
         syncRemoteParticipants(data.participants);
-        const currentParticipant = data.participants.find(p => p.userId === currentUserId);
+        const currentParticipant = data.participants.find(p => p.userId === currentUserIdRef.current);
         if (currentParticipant) {
           applyBroadcastPresenterState(Boolean(currentParticipant.canBroadcast));
         }
@@ -733,7 +807,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         console.log(`[Presenter] Broadcast mode changed to ${data.broadcastMode}`);
         setBroadcastMode(data.broadcastMode);
         syncRemoteParticipants(data.participants);
-        const currentParticipant = data.participants.find(p => p.userId === currentUserId);
+        const currentParticipant = data.participants.find(p => p.userId === currentUserIdRef.current);
         applyBroadcastPresenterState(Boolean(currentParticipant?.canBroadcast));
       });
 
@@ -756,7 +830,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           return;
         }
 
-        if (userId === currentUserId) {
+        if (userId === currentUserIdRef.current) {
           // console.warn(`[MediaChunk] Ignored loopback chunk from self (socketId: ${socketId})`);
           return;
         }
@@ -833,7 +907,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
 
       socket.on('camera-state-changed', (data: { userId: string; hasVideo: boolean }) => {
-        console.log(`[Client] Camera state changed for userId=${data.userId}, hasVideo=${data.hasVideo}, currentUserId=${currentUserId}`);
+        console.log(`[Client] Camera state changed for userId=${data.userId}, hasVideo=${data.hasVideo}, currentUserId=${currentUserIdRef.current}`);
 
         // REMOVED: Do NOT reset MediaSource. Stream is continuous.
         // Just update the UI state.
@@ -967,14 +1041,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
 
         // 🛡️ Safety net: If backend fails and 'subtitle-broadcast' never arrives, remove the stuck subtitle after 8 seconds
-        setTimeout(() => {
-          setSubtitles(prev => prev.filter(s => s.id !== data.id));
-        }, 8000);
+        scheduleSubtitleRemoval(data.id, 9000);
       });
 
       // Step 2: Interim translated captions update the same subtitle row in-place.
       socket.on('subtitle-stream-update', (data: SubtitleData & { originalText?: string }) => {
         upsertStreamingSubtitle({ ...data, latencyMs: getSubtitleLatencyMs(data) });
+        scheduleSubtitleRemoval(data.id, data.isFinal ? 6000 : 9000);
       });
 
       // Step 3: Final parsed translations arrive → replace placeholder in-place
@@ -988,9 +1061,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         upsertStreamingSubtitle({ ...data, latencyMs, isFinal: true });
         // Auto-remove after 6 seconds
-        setTimeout(() => {
-          setSubtitles(prev => prev.filter(s => s.id !== data.id));
-        }, 6000);
+        scheduleSubtitleRemoval(data.id, 6000);
       });
 
       socket.on('stream-reset', ({ userId }: { userId: string }) => {
@@ -1004,6 +1075,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       socket.on('request-keyframe', ({ fromUserId }: { fromUserId: string }) => {
         if (!isBroadcastPresenterRef.current) return;
         console.log(`[Keyframe] Received request for keyframe from ${fromUserId}, restarting MediaRecorder...`);
+        socketRef.current?.emit('stream-reset', { roomId, userId: currentUserIdRef.current });
         const outgoingStream = createOutgoingStream(isScreenSharingRef.current ? screenStreamRef.current : localStreamRef.current);
         if (outgoingStream) setupMediaRecorder(outgoingStream);
       });
@@ -1163,6 +1235,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     const tracks: MediaStreamTrack[] = [];
     const videoTrack = videoSource?.getVideoTracks()[0];
     if (videoTrack) tracks.push(videoTrack);
+    if (isMutedRef.current) return tracks.length > 0 ? new MediaStream(tracks) : null;
 
     const screenAudioTrack = videoSource && videoSource !== localStreamRef.current
       ? videoSource.getAudioTracks()[0]
@@ -1205,58 +1278,68 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
     if (socketRef.current && stream) {
       const hasVideo = stream.getVideoTracks().length > 0;
-      let mimeType = 'video/webm; codecs=vp8,opus';
+      const hasAudio = stream.getAudioTracks().length > 0;
+      const possibleTypes = hasVideo && hasAudio
+        ? ['video/webm; codecs="vp8, opus"', 'video/webm; codecs=vp8,opus', 'video/webm']
+        : hasVideo
+          ? ['video/webm; codecs="vp8"', 'video/webm; codecs=vp8', 'video/webm']
+          : hasAudio
+            ? ['audio/webm; codecs="opus"', 'audio/webm; codecs=opus', 'audio/webm']
+            : [];
+      const supportedTypes = possibleTypes.filter(type => MediaRecorder.isTypeSupported(type));
+      const recorderCandidates = supportedTypes.length > 0 ? supportedTypes : [''];
 
-      if (hasVideo) {
-        const possibleTypes = [
-          'video/webm; codecs=vp8,opus',
-          'video/webm; codecs=vp9,opus',
-          'video/webm; codecs=h264,opus',
-          'video/mp4; codecs=h264,aac',
-        ];
-        for (const type of possibleTypes) {
-          if (MediaRecorder.isTypeSupported(type)) {
-            mimeType = type;
-            break;
-          }
-        }
-      } else {
-        mimeType = 'audio/webm; codecs=opus';
+      if (recorderCandidates.length === 0) {
+        console.warn('[MediaRecorder] No supported mime type for current stream tracks.', { hasVideo, hasAudio });
+        stopMediaRecorder();
+        return;
       }
 
-      console.log(`Client: Setting up MediaRecorder with mimeType: ${mimeType}`);
+      let startedRecorder: MediaRecorder | null = null;
+      let startedMimeType = '';
+      for (const candidateMimeType of recorderCandidates) {
+        try {
+          console.log(`Client: Trying MediaRecorder with mimeType: ${candidateMimeType || 'browser-default'}`);
+          const mediaRecorder = candidateMimeType
+            ? new MediaRecorder(stream, { mimeType: candidateMimeType })
+            : new MediaRecorder(stream);
 
-      const options = { mimeType };
-      try {
-        const mediaRecorder = new MediaRecorder(stream, options);
+          mediaRecorder.ondataavailable = (event) => {
+            // console.log(`[MediaRecorder] ondataavailable triggered, data size: ${event.data?.size || 0}`);
+            if (event.data && event.data.size > 0) {
+              const mediaPacket = {
+                chunk: event.data,
+                mimeType: startedMimeType || event.data.type || candidateMimeType,
+                timestamp: Date.now() // Add timestamp for latency measurement
+              };
 
-        mediaRecorder.ondataavailable = (event) => {
-          // console.log(`[MediaRecorder] ondataavailable triggered, data size: ${event.data?.size || 0}`);
-          if (event.data && event.data.size > 0) {
-            const mediaPacket = {
-              chunk: event.data,
-              mimeType,
-              timestamp: Date.now() // Add timestamp for latency measurement
-            };
-
-            if (socketRef.current?.connected) {
-              flushPendingMediaChunks();
-              socketRef.current.emit('media-chunk', mediaPacket);
-            } else {
-              if (pendingMediaChunksRef.current.length > 8) {
-                pendingMediaChunksRef.current.shift();
+              if (socketRef.current?.connected) {
+                flushPendingMediaChunks();
+                socketRef.current.emit('media-chunk', mediaPacket);
+              } else {
+                if (pendingMediaChunksRef.current.length > 8) {
+                  pendingMediaChunksRef.current.shift();
+                }
+                pendingMediaChunksRef.current.push(mediaPacket);
               }
-              pendingMediaChunksRef.current.push(mediaPacket);
+            } else {
+              console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
             }
-          } else {
-            console.warn(`[MediaRecorder] Skipping empty chunk or no socket. Data size: ${event.data?.size}, Socket: ${!!socketRef.current}`);
-          }
-        };
-        mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(200); // 0.2s chunks for lower media relay latency
-        console.log('Client: MediaRecorder started with 200ms intervals');
-      } catch (e) {
-        console.error('MediaRecorder setup failed:', e);
+          };
+
+          mediaRecorder.start(500);
+          startedRecorder = mediaRecorder;
+          startedMimeType = candidateMimeType || mediaRecorder.mimeType || 'video/webm';
+          mediaRecorderRef.current = mediaRecorder;
+          console.log(`Client: MediaRecorder started with mimeType: ${startedMimeType}`);
+          break;
+        } catch (error) {
+          console.warn(`MediaRecorder start failed for ${candidateMimeType || 'browser-default'}, trying next candidate`, error);
+        }
+      }
+
+      if (!startedRecorder) {
+        console.error('MediaRecorder setup failed for all candidates.', { hasVideo, hasAudio, recorderCandidates });
       }
     }
   };
@@ -1467,8 +1550,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         }
 
         const sourceBuffer = mediaSource.addSourceBuffer(mimeType);
+        try {
+          sourceBuffer.mode = 'sequence';
+        } catch (error) {
+          console.warn(`[MediaSource] Could not set sequence mode for ${socketId}`, error);
+        }
         sourceBuffersRef.current[socketId] = sourceBuffer;
         startRemoteLatencyMonitor(socketId);
+        const resumeRemotePlayback = () => applyRemoteLiveCatchup(socketId, 'interval');
+        videoElement?.addEventListener('stalled', resumeRemotePlayback);
+        videoElement?.addEventListener('waiting', resumeRemotePlayback);
+        videoElement?.addEventListener('pause', resumeRemotePlayback);
 
         sourceBuffer.addEventListener('updateend', async () => {
           // Safety check: Ensure the buffer is still active and the MediaSource is open
@@ -1568,17 +1660,35 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     console.log(`Cleaning up MediaSource for ${socketId}`);
     stopRemoteLatencyMonitor(socketId);
     const mediaSource = mediaSourcesRef.current[socketId];
+    const sourceBuffer = sourceBuffersRef.current[socketId];
     if (mediaSource && mediaSource.readyState === 'open') {
-      try {
+      const finishStream = () => {
+        if (mediaSource.readyState !== 'open') return;
+        if (Array.from(mediaSource.sourceBuffers).some(buffer => buffer.updating)) return;
         mediaSource.endOfStream();
+      };
+
+      try {
+        if (sourceBuffer?.updating) {
+          sourceBuffer.addEventListener('updateend', () => {
+            try {
+              finishStream();
+            } catch (e) {
+              console.warn(`Ignored delayed endOfStream error for ${socketId}`, e);
+            }
+          }, { once: true });
+        } else {
+          finishStream();
+        }
       } catch (e) {
-        console.error(`Error ending stream for ${socketId}`, e);
+        console.warn(`Ignored endOfStream cleanup race for ${socketId}`, e);
       }
     }
     const userId = socketIdToUserIdMap.current[socketId];
     if (userId && remoteVideoRefs.current[userId]) {
       const videoEl = remoteVideoRefs.current[userId];
       if (videoEl) {
+        videoEl.onloadedmetadata = null;
         const src = videoEl.src;
         if (src && src.startsWith('blob:')) {
           URL.revokeObjectURL(src);
@@ -1906,6 +2016,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     setIsMuted(newMutedState);
     isMutedRef.current = newMutedState;
 
+    if (!newMutedState) {
+      socketRef.current?.emit('mic-state-changed', {
+        roomId,
+        userId: currentUserIdRef.current,
+        isMuted: false
+      });
+      void initializeMediaStream(localVideoOnRef.current, false, false);
+      return;
+    }
+
     // 1. Web Audio API (GainNode) 볼륨 조절
     if (gainNodeRef.current) {
       // micVolume 변수가 스코프에 없거나 깨졌을 수 있으므로 기본값 1 적용
@@ -1921,9 +2041,34 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       }
     }
 
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach((audioTrack) => {
+        localStreamRef.current?.removeTrack(audioTrack);
+        audioTrack.stop();
+        console.log(`[toggleMute] Hardware audio track stopped: ${audioTrack.id}`);
+      });
+    }
+
+    try {
+      recognitionRef.current?.abort?.();
+      recognitionRef.current?.stop?.();
+      console.log("[STT] Aborted (mic muted)");
+    } catch (e) {}
+    stopSubtitleAudioStreaming();
+    socketRef.current?.emit('subtitle-stt-stop', { roomId });
+    closeAudioContext();
+
+    const outgoingStream = createOutgoingStream(isScreenSharingRef.current ? screenStreamRef.current : localStreamRef.current);
+    if (outgoingStream) {
+      setupMediaRecorder(outgoingStream);
+    } else {
+      stopMediaRecorder();
+    }
+    socketRef.current?.emit('stream-reset', { roomId, userId: currentUserIdRef.current });
+
     socketRef.current?.emit('mic-state-changed', {
       roomId,
-      userId: currentUserId,
+      userId: currentUserIdRef.current,
       isMuted: newMutedState
     });
   };
@@ -2283,6 +2428,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           if (errorCode >= 3) {
             console.error(`[VideoRef] Fatal video error for ${userId} (code ${errorCode}):`, videoError?.message);
             cleanupMediaSource(socketId);
+            socketRef.current?.emit('request-keyframe', { roomId, userId });
           } else {
             console.warn(`[VideoRef] Minor video error for ${userId} (code ${errorCode}), auto-recovering...`);
             // Re-attach the listener for next potential error
