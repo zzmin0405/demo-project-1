@@ -1,0 +1,137 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/mysql-test-client"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("MYSQL_MIGRATION_TEST_URL")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id                String    @id @default(cuid())
+  name              String?   @db.VarChar(50)
+  email             String?   @unique
+  emailVerified     DateTime?
+  image             String?
+  lastProfileUpdate DateTime?
+  accounts          Account[]
+  sessions          Session[]
+  createdRooms      MeetingRoom[] @relation("CreatedRooms")
+  participations    Participant[]
+  chatLogs          ChatLog[]
+  sttTranscriptLogs SttTranscriptLog[]
+}
+
+model MeetingRoom {
+  id          String   @id @default(cuid())
+  title       String   @db.VarChar(100)
+  description String?  @db.VarChar(500)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  creatorId   String
+  creator     User     @relation("CreatedRooms", fields: [creatorId], references: [id])
+  currentMode String   @default("FREE")
+  isChatSaved Boolean  @default(true)
+  isSttSaved  Boolean  @default(false)
+
+  participants      Participant[]
+  chatLogs          ChatLog[]
+  sttTranscriptLogs SttTranscriptLog[]
+  summaries         MeetingSummary[]
+
+  @@index([title])
+}
+
+model Participant {
+  id            String   @id @default(cuid())
+  userId        String
+  meetingRoomId String
+  joinedAt      DateTime @default(now())
+  leftAt        DateTime?
+  role          String   @default("PARTICIPANT")
+  status        String   @default("APPROVED")
+  isMuted       Boolean  @default(false)
+  isVideoOff    Boolean  @default(false)
+  handRaisedAt  DateTime?
+
+  user        User        @relation(fields: [userId], references: [id])
+  meetingRoom MeetingRoom @relation(fields: [meetingRoomId], references: [id])
+
+  @@unique([userId, meetingRoomId])
+}
+
+model ChatLog {
+  id            String   @id @default(cuid())
+  content       String   @db.VarChar(1000)
+  createdAt     DateTime @default(now())
+  userId        String
+  meetingRoomId String
+
+  user        User        @relation(fields: [userId], references: [id])
+  meetingRoom MeetingRoom @relation(fields: [meetingRoomId], references: [id])
+}
+
+model SttTranscriptLog {
+  id            String   @id @default(cuid())
+  originalText  String   @db.Text
+  ko            String   @db.Text
+  en            String   @db.Text
+  ja            String   @db.Text
+  zh            String   @db.Text
+  sourceLang    String?  @db.VarChar(20)
+  sequence      Int?
+  capturedAt    DateTime @default(now())
+  userId        String
+  meetingRoomId String
+
+  user        User        @relation(fields: [userId], references: [id])
+  meetingRoom MeetingRoom @relation(fields: [meetingRoomId], references: [id], onDelete: Cascade)
+
+  @@index([meetingRoomId, capturedAt])
+  @@index([userId])
+}
+
+model MeetingSummary {
+  id            String   @id @default(cuid())
+  content       String   @db.Text
+  createdAt     DateTime @default(now())
+  meetingRoomId String
+
+  meetingRoom MeetingRoom @relation(fields: [meetingRoomId], references: [id])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}

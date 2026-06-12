@@ -6,6 +6,7 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
+import { randomUUID } from 'crypto';
 import { Server, Socket } from 'socket.io';
 import { SupabaseAuthGuard } from '../auth/supabase-auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
@@ -152,7 +153,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('chat-message')
-  async handleChatMessage(client: Socket, data: { roomId: string; message: string }): Promise<void> {
+  async handleChatMessage(client: Socket, data: { roomId: string; message: string; clientMessageId?: string }): Promise<void> {
     console.log(`[ChatDebug] Received message from ${client.id} for room ${data.roomId}: ${data.message}`);
     const userId = client['user']?.sub;
     if (!userId) {
@@ -213,6 +214,9 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     }
 
+    const chatMessageId = data.clientMessageId || randomUUID();
+    const timestamp = new Date().toISOString();
+
     // 1. Save to Database (Async, don't block broadcast)
     try {
       const meetingRoom = await this.prisma.meetingRoom.findUnique({
@@ -237,10 +241,11 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     // 2. Broadcast to room
     this.server.to(data.roomId).emit('chat-message', {
+      id: chatMessageId,
       userId: userId,
       username: participant.username,
       message: data.message,
-      timestamp: new Date().toISOString(),
+      timestamp,
       avatar_url: participant.avatar_url
     });
   }

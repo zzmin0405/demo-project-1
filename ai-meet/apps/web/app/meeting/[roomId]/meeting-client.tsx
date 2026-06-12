@@ -28,9 +28,22 @@ interface Participant {
   avatar_url?: string;
 }
 
+type ChatMessage = {
+  id: string;
+  userId: string;
+  username: string;
+  message: string;
+  timestamp: string;
+  avatar_url?: string;
+};
+
 type LayoutMode = 'speaker' | 'grid';
 type SttProvider = 'browser' | 'deepgram';
 type BroadcastMode = 'single' | 'all';
+type AssistantPanelTab = 'translation' | 'chat' | 'summary';
+
+const REMOTE_CHUNK_QUEUE_LIMIT = 60;
+const MEDIA_RECORDER_TIMESLICE_MS = 750;
 
 type MeetingSummary = {
   id: string;
@@ -110,14 +123,20 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const [isSubtitlesEnabled, setIsSubtitlesEnabled] = useState(false);
   const isSubtitlesEnabledRef = useRef(false);
   const [subtitleLangs, setSubtitleLangs] = useState<SubtitleLang[]>(['ko', 'en', 'ja', 'zh']); // languages to DISPLAY
-  const [sttLang, setSttLang] = useState(''); // language user SPEAKS (for STT accuracy)
-  const sttLangRef = useRef('');
+  const [sttLang, setSttLang] = useState('ko-KR'); // language user SPEAKS (for STT accuracy)
+  const sttLangRef = useRef('ko-KR');
   const [sttProvider, setSttProvider] = useState<SttProvider>('browser');
   const sttProviderRef = useRef<SttProvider>('browser');
   const [isSttSaved, setIsSttSaved] = useState(false);
   const [isSttSavingUpdating, setIsSttSavingUpdating] = useState(false);
   const [subtitles, setSubtitles] = useState<SubtitleData[]>([]);
+  const [subtitleTranscript, setSubtitleTranscript] = useState<SubtitleData[]>([]);
   const recognitionRef = useRef<any>(null);
+  const browserSttRunningRef = useRef(false);
+  const browserSttStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const browserSttIntentionalStopRef = useRef(false);
+  const browserSttLastStartAtRef = useRef(0);
+  const browserSttLastResultAtRef = useRef(0);
   
   // Microphone Settings
   const [noiseSuppression, setNoiseSuppression] = useState(true);
@@ -156,9 +175,16 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     currentUserIdRef.current = currentUserId;
   }, [currentUserId]);
 
+  useEffect(() => {
+    if (broadcastMode === 'single' && layoutMode !== 'speaker') {
+      setLayoutMode('speaker');
+    }
+  }, [broadcastMode, layoutMode]);
+
   // Chat State
   const [showChatPanel, setShowChatPanel] = useState(false);
-  const [chatMessages, setChatMessages] = useState<{ userId: string; username: string; message: string; timestamp: string; avatar_url?: string }[]>([]);
+  const [assistantPanelTab, setAssistantPanelTab] = useState<AssistantPanelTab>('translation');
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const [meetingSummaries, setMeetingSummaries] = useState<MeetingSummary[]>([]);
@@ -175,6 +201,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const socketIdToUserIdMap = useRef<{ [socketId: string]: string }>({});
   const userIdToSocketIdMap = useRef<{ [userId: string]: string }>({});
   const isInitialized = useRef(false);
+  const pendingSubtitleMicEnableRef = useRef(false);
 
   // Audio Processing Refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -185,10 +212,13 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   const mediaSourcesRef = useRef<{ [socketId: string]: MediaSource }>({});
   const sourceBuffersRef = useRef<{ [socketId: string]: SourceBuffer }>({});
   const chunkQueueRef = useRef<{ [socketId: string]: Blob[] }>({});
+  const remoteChunkProcessingRef = useRef<{ [socketId: string]: boolean }>({});
   const pendingMediaChunksRef = useRef<{ chunk: Blob; mimeType: string; timestamp: number }[]>([]);
   const remoteMimeTypesRef = useRef<{ [socketId: string]: string }>({});
   const mediaSourceUrlsRef = useRef<{ [socketId: string]: string }>({}); // Track created Object URLs
   const remoteLatencyIntervalsRef = useRef<{ [socketId: string]: NodeJS.Timeout }>({});
+  const remoteStreamRestartPendingRef = useRef<Set<string>>(new Set());
+  const remoteRecoveryLastRequestedAtRef = useRef<Record<string, number>>({});
   const remoteVideosAwaitingUserGestureRef = useRef<Set<HTMLVideoElement>>(new Set());
   const hasUserInteractedRef = useRef(false);
 
@@ -313,6 +343,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           remoteVideosAwaitingUserGestureRef.current.add(videoElement);
         });
       });
+
+      Object.values(remoteVideoRefs.current).forEach(videoElement => {
+        if (!videoElement) return;
+        videoElement.muted = false;
+        videoElement.volume = volume;
+        videoElement.play().catch(error => {
+          if (error.name !== 'AbortError') {
+            console.warn('[Autoplay] Remote video play retry failed after user gesture:', error);
+          }
+        });
+      });
     };
 
     window.addEventListener('click', resumeBlockedRemoteVideos, { capture: true });
@@ -324,6 +365,68 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       window.removeEventListener('touchstart', resumeBlockedRemoteVideos, { capture: true });
       window.removeEventListener('keydown', resumeBlockedRemoteVideos, { capture: true });
     };
+  }, [volume]);
+
+  const stopBrowserStt = useCallback((reason: string) => {
+    if (browserSttStartTimerRef.current) {
+      clearTimeout(browserSttStartTimerRef.current);
+      browserSttStartTimerRef.current = null;
+    }
+    if (!recognitionRef.current) return;
+    if (!browserSttRunningRef.current) {
+      browserSttIntentionalStopRef.current = false;
+      return;
+    }
+    browserSttIntentionalStopRef.current = true;
+    try {
+      recognitionRef.current.stop();
+      console.log(`[STT] Stopped (${reason})`);
+    } catch (e) {
+      console.warn(`[STT] Stop skipped/failed (${reason}):`, e);
+    } finally {
+      browserSttRunningRef.current = false;
+    }
+  }, []);
+
+  const startBrowserStt = useCallback((reason: string, delayMs = 0) => {
+    if (browserSttStartTimerRef.current) {
+      clearTimeout(browserSttStartTimerRef.current);
+      browserSttStartTimerRef.current = null;
+    }
+
+    const run = () => {
+      if (!isSubtitlesEnabledRef.current || isMutedRef.current || !isBroadcastPresenterRef.current || sttProviderRef.current !== 'browser') return;
+      if (!recognitionRef.current) return;
+      if (browserSttRunningRef.current) return;
+
+      const elapsedSinceLastStart = Date.now() - browserSttLastStartAtRef.current;
+      if (elapsedSinceLastStart < 550) {
+        browserSttStartTimerRef.current = setTimeout(run, 550 - elapsedSinceLastStart);
+        return;
+      }
+
+      try {
+        browserSttIntentionalStopRef.current = false;
+        recognitionRef.current.start();
+        browserSttLastStartAtRef.current = Date.now();
+        browserSttRunningRef.current = true;
+        console.log(`[STT] Started (${reason})`);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (message.toLowerCase().includes('already') || message.toLowerCase().includes('started')) {
+          browserSttRunningRef.current = true;
+          return;
+        }
+        browserSttRunningRef.current = false;
+        console.warn(`[STT] Start skipped/failed (${reason}):`, e);
+      }
+    };
+
+    if (delayMs > 0) {
+      browserSttStartTimerRef.current = setTimeout(run, delayMs);
+    } else {
+      run();
+    }
   }, []);
 
   // --- Subtitles STT Setup ---
@@ -380,6 +483,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             if (isMutedRef.current || !isBroadcastPresenterRef.current || sttProviderRef.current !== 'browser') {
               return;
             }
+            browserSttLastResultAtRef.current = Date.now();
 
             for (let i = event.resultIndex; i < event.results.length; i++) {
               const transcript = event.results[i][0].transcript.trim();
@@ -435,29 +539,40 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
          recognition.onerror = (event: any) => {
             if (event.error === 'no-speech') return; // Normal silence, ignore
 
+            if (event.error === 'aborted' && browserSttIntentionalStopRef.current) {
+              console.log("[STT] Ignored expected abort during stop");
+              return;
+            }
+
             console.warn("[STT] Error:", event.error);
 
             // For network/aborted errors, schedule a restart
-            if (['network', 'aborted', 'service-not-allowed'].includes(event.error)) {
+            if (['network', 'aborted'].includes(event.error)) {
               if (restartTimeoutRef) clearTimeout(restartTimeoutRef);
               restartTimeoutRef = setTimeout(() => {
                 if (isSubtitlesEnabledRef.current && !isMutedRef.current && isBroadcastPresenterRef.current && sttProviderRef.current === 'browser') {
-                  try { recognition.start(); } catch (e) {}
+                  browserSttRunningRef.current = false;
+                  startBrowserStt('recognition error retry');
                 }
-              }, 500);
+              }, 650);
             }
          };
 
          recognition.onend = () => {
+             browserSttRunningRef.current = false;
+             if (browserSttIntentionalStopRef.current) {
+               browserSttIntentionalStopRef.current = false;
+               return;
+             }
              // KEY FIX: Delay restart by 300ms to avoid race condition where browser
              // is still "stopping" and rejects the immediate start() call silently
              if (isSubtitlesEnabledRef.current && !isMutedRef.current && isBroadcastPresenterRef.current && sttProviderRef.current === 'browser') {
                if (restartTimeoutRef) clearTimeout(restartTimeoutRef);
                restartTimeoutRef = setTimeout(() => {
                  if (isSubtitlesEnabledRef.current && !isMutedRef.current && isBroadcastPresenterRef.current && sttProviderRef.current === 'browser') {
-                   try { recognition.start(); } catch (e) {}
+                   startBrowserStt('recognition ended retry');
                  }
-               }, 300);
+               }, 450);
              }
          };
 
@@ -469,19 +584,47 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     return () => {
       if (recognitionRef.current) {
-        recognitionRef.current.stop();
+        stopBrowserStt('cleanup');
       }
     };
-  }, [roomId]);
+  }, [roomId, startBrowserStt, stopBrowserStt]);
+
+  useEffect(() => {
+    const watchdog = window.setInterval(() => {
+      const shouldRun = isSubtitlesEnabledRef.current
+        && !isMutedRef.current
+        && isBroadcastPresenterRef.current
+        && sttProviderRef.current === 'browser'
+        && Boolean(recognitionRef.current);
+
+      if (!shouldRun || browserSttRunningRef.current || browserSttStartTimerRef.current) return;
+
+      console.log('[STT] Watchdog restarting browser recognition');
+      startBrowserStt('watchdog restart');
+    }, 1500);
+
+    return () => window.clearInterval(watchdog);
+  }, [startBrowserStt]);
 
   useEffect(() => {
     isSubtitlesEnabledRef.current = isSubtitlesEnabled;
-    if (isBroadcastPresenter && isSubtitlesEnabled && !isMuted && sttProvider === 'browser' && recognitionRef.current) {
-      try { recognitionRef.current.start(); console.log("[STT] Started (CC on + mic on)"); } catch (e) {}
-    } else if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); console.log("[STT] Stopped"); } catch (e) {}
+    if (isSubtitlesEnabled) {
+      console.log('[STT] State check', {
+        isBroadcastPresenter,
+        isMuted,
+        sttProvider,
+        hasRecognition: Boolean(recognitionRef.current),
+        socketConnected: Boolean(socketRef.current?.connected),
+      });
     }
-  }, [isBroadcastPresenter, isSubtitlesEnabled, isMuted, sttProvider]);
+    if (isBroadcastPresenter && isSubtitlesEnabled && !isMuted && sttProvider === 'browser' && recognitionRef.current) {
+      startBrowserStt('cc on + mic on');
+    } else if (recognitionRef.current) {
+      stopBrowserStt('state changed');
+    } else if (isSubtitlesEnabled) {
+      console.warn('[STT] Browser recognition is not ready or not supported.');
+    }
+  }, [isBroadcastPresenter, isSubtitlesEnabled, isMuted, sttProvider, startBrowserStt, stopBrowserStt]);
 
   useEffect(() => {
     sttLangRef.current = sttLang;
@@ -502,11 +645,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   useEffect(() => {
     if (!recognitionRef.current) return;
     if (isBroadcastPresenter && isSubtitlesEnabled && !isMuted && sttProvider === 'browser') {
-      try { recognitionRef.current.start(); console.log("[STT] Resumed (mic unmuted)"); } catch (e) {}
+      startBrowserStt('mic unmuted');
     } else if (isMuted) {
-      try { recognitionRef.current.stop(); console.log("[STT] Paused (mic muted)"); } catch (e) {}
+      stopBrowserStt('mic muted');
     }
-  }, [isBroadcastPresenter, isMuted, isSubtitlesEnabled, sttProvider]);
+  }, [isBroadcastPresenter, isMuted, isSubtitlesEnabled, sttProvider, startBrowserStt, stopBrowserStt]);
 
   useEffect(() => {
     const shouldUseServerStt = isBroadcastPresenter && isSubtitlesEnabled && !isMuted;
@@ -529,12 +672,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   useEffect(() => {
     if (sttProvider === 'deepgram' && isBroadcastPresenter && isSubtitlesEnabled && !isMuted) {
-      try { recognitionRef.current?.stop(); } catch (e) {}
+      stopBrowserStt('deepgram active');
       setupSubtitleAudioStreaming();
     } else {
       stopSubtitleAudioStreaming();
     }
-  }, [isBroadcastPresenter, isMuted, isSubtitlesEnabled, sttProvider]);
+  }, [isBroadcastPresenter, isMuted, isSubtitlesEnabled, sttProvider, stopBrowserStt]);
 
   const applyBroadcastPresenterState = useCallback((canBroadcast: boolean) => {
     setIsBroadcastPresenter(canBroadcast);
@@ -542,7 +685,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
     if (!canBroadcast) {
       stopLocalBroadcast();
-      try { recognitionRef.current?.stop(); } catch (e) {}
+      stopBrowserStt('broadcast permission revoked');
       socketRef.current?.emit('subtitle-stt-stop', { roomId });
       return;
     }
@@ -625,10 +768,14 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
       // Initialize Socket.IO
       const websocketUrl = process.env.NEXT_PUBLIC_WEBSOCKET_URL || 'http://localhost:3001';
+      const socketPath = /(^http:\/\/(127\.0\.0\.1|localhost)|api\.yumeet\.site)/.test(websocketUrl)
+        ? '/socket.io'
+        : '/realtime';
       console.log('Client: Connecting to WebSocket at', websocketUrl);
 
       socketRef.current = io(websocketUrl, {
-        transports: ['polling', 'websocket'], // Start stable through tunnel, then upgrade to WebSocket.
+        path: socketPath,
+        transports: ['polling', 'websocket'],
         auth: {
           token: sessionUserId, // Server canonicalizes email tokens to the DB user id.
           userId: sessionUserId
@@ -840,6 +987,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         userIdToSocketIdMap.current[userId] = socketId;
         remoteMimeTypesRef.current[socketId] = mimeType;
 
+        if (remoteStreamRestartPendingRef.current.has(socketId)) {
+          return;
+        }
+
         // Ensure MediaSource is open
         if (!mediaSourcesRef.current[socketId] || mediaSourcesRef.current[socketId].readyState === 'closed') {
           if (mediaSourcesRef.current[socketId]) {
@@ -862,35 +1013,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         // Always queue if sourceBuffer doesn't exist yet
         if (!sourceBuffer) {
-          if (!chunkQueueRef.current[socketId]) {
-            chunkQueueRef.current[socketId] = [];
-          }
-          // Limit queue size to prevent memory overflow on slow connections
-          if (chunkQueueRef.current[socketId].length > 30) {
-            chunkQueueRef.current[socketId].shift(); // Drop oldest chunk
-          }
-          chunkQueueRef.current[socketId].push(blob);
+          enqueueRemoteChunk(socketId, blob);
           return;
         }
 
         // 항상 큐(Queue)에 먼저 넣어 클러스터 순서(Timestamp)가 꼬이지 않도록 엄격하게 유지
-        if (!chunkQueueRef.current[socketId]) {
-          chunkQueueRef.current[socketId] = [];
-        }
-        // Limit queue size to prevent memory overflow
-        if (chunkQueueRef.current[socketId].length > 30) {
-          chunkQueueRef.current[socketId].shift(); // Drop oldest chunk
-        }
-        chunkQueueRef.current[socketId].push(blob);
+        enqueueRemoteChunk(socketId, blob);
+        void processRemoteChunkQueue(socketId);
 
         // 버퍼가 비어있고, 넣을 데이터가 큐에 존재하면 즉시 큐를 재가동(Jumpstart)
-        if (!sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
+        if (false && !sourceBuffer.updating && mediaSource && mediaSource.readyState === 'open') {
           const nextChunk = chunkQueueRef.current[socketId][0]; // Peek
           if (nextChunk) {
             try {
-              sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+              sourceBuffer.appendBuffer(await nextChunk!.arrayBuffer());
               chunkQueueRef.current[socketId].shift(); // 정상적으로 들어갔을 때만 큐에서 제거
-            } catch (e) {
+            } catch (e: any) {
               if (e instanceof DOMException && e.name === 'InvalidStateError') {
                 console.warn(`Ignored InvalidStateError for ${socketId} (likely cleanup race condition)`);
               } else {
@@ -919,8 +1057,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
       });
 
-      socket.on('chat-message', (data: { userId: string; username: string; message: string; timestamp: string; avatar_url?: string }) => {
-        setChatMessages(prev => [...prev, data]);
+      socket.on('chat-message', (data: ChatMessage) => {
+        const messageId = data.id || `${data.userId}-${data.timestamp}-${data.message}`;
+        const nextMessage = { ...data, id: messageId };
+        setChatMessages(prev => (
+          prev.some(message => message.id === messageId) ? prev : [...prev, nextMessage]
+        ));
       });
 
       socket.on('meeting-title-updated', (data: { title: string }) => {
@@ -960,6 +1102,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         } else {
           console.log(`[STT] Falling back to browser STT (${data.reason || 'server unavailable'})`);
           setSttProvider('browser');
+          startBrowserStt('browser fallback', 250);
         }
       });
 
@@ -1013,6 +1156,43 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           const newSubtitles = [...withoutCurrent, nextSubtitle];
           return newSubtitles.length > 5 ? newSubtitles.slice(-5) : newSubtitles;
         });
+        setSubtitleTranscript(prev => {
+          const existing = prev.find(s => s.id === data.id);
+          const latencyMs = getSubtitleLatencyMs({ ...existing, ...data });
+          const nextSubtitle: SubtitleData = existing ? {
+            ...existing,
+            ...data,
+            ko: data.ko ?? data.originalText ?? existing.ko,
+            en: data.en ?? existing.en,
+            ja: data.ja ?? existing.ja,
+            zh: data.zh ?? existing.zh,
+            latencyMs,
+            clientTimestamp: data.clientTimestamp ?? existing.clientTimestamp,
+            serverReceivedAt: data.serverReceivedAt ?? existing.serverReceivedAt,
+            translationStartedAt: data.translationStartedAt ?? existing.translationStartedAt,
+            translationFinishedAt: data.translationFinishedAt ?? existing.translationFinishedAt,
+          } : {
+            id: data.id,
+            userId: data.userId,
+            userName: data.userName,
+            originalText: data.originalText,
+            ko: data.ko ?? data.originalText ?? '',
+            en: data.en ?? '...',
+            ja: data.ja ?? '...',
+            zh: data.zh ?? '...',
+            isFinal: data.isFinal,
+            sequence: data.sequence,
+            latencyMs,
+            clientTimestamp: data.clientTimestamp,
+            serverReceivedAt: data.serverReceivedAt,
+            translationStartedAt: data.translationStartedAt,
+            translationFinishedAt: data.translationFinishedAt,
+          };
+
+          const withoutCurrent = prev.filter(s => s.id !== data.id);
+          const nextTranscript = [...withoutCurrent, nextSubtitle];
+          return nextTranscript.length > 200 ? nextTranscript.slice(-200) : nextTranscript;
+        });
       };
 
       // Step 1: Original text arrives instantly → show placeholder immediately
@@ -1041,6 +1221,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
 
         // 🛡️ Safety net: If backend fails and 'subtitle-broadcast' never arrives, remove the stuck subtitle after 8 seconds
+        setSubtitleTranscript(prev => {
+          const withoutCurrent = prev.filter(s => s.id !== placeholder.id);
+          const nextTranscript = [...withoutCurrent, placeholder];
+          return nextTranscript.length > 200 ? nextTranscript.slice(-200) : nextTranscript;
+        });
         scheduleSubtitleRemoval(data.id, 9000);
       });
 
@@ -1068,16 +1253,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         const socketId = userIdToSocketIdMap.current[userId];
         if (socketId) {
           console.log(`[StreamReset] Received stream reset for ${userId}, cleaning up MediaSource...`);
-          cleanupMediaSource(socketId);
+          remoteStreamRestartPendingRef.current.delete(socketId);
+          cleanupMediaSource(socketId, { keepMimeType: true });
         }
       });
 
       socket.on('request-keyframe', ({ fromUserId }: { fromUserId: string }) => {
         if (!isBroadcastPresenterRef.current) return;
         console.log(`[Keyframe] Received request for keyframe from ${fromUserId}, restarting MediaRecorder...`);
-        socketRef.current?.emit('stream-reset', { roomId, userId: currentUserIdRef.current });
         const outgoingStream = createOutgoingStream(isScreenSharingRef.current ? screenStreamRef.current : localStreamRef.current);
         if (outgoingStream) setupMediaRecorder(outgoingStream);
+        socketRef.current?.emit('stream-reset', { roomId, userId: currentUserIdRef.current });
       });
 
       socket.on('chat-error', (data: { message: string }) => {
@@ -1242,12 +1428,25 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       : undefined;
     const processedAudioTrack = audioDestinationRef.current?.stream?.getAudioTracks()[0];
     const rawAudioTrack = localStreamRef.current?.getAudioTracks()[0];
-    if (screenAudioTrack) {
+    const isLiveAudioTrack = (track?: MediaStreamTrack): track is MediaStreamTrack => Boolean(track && track.readyState === 'live');
+
+    if (isLiveAudioTrack(screenAudioTrack)) {
       tracks.push(screenAudioTrack);
-    } else if (processedAudioTrack) {
-      tracks.push(processedAudioTrack);
-    } else if (rawAudioTrack) {
+    } else if (isLiveAudioTrack(rawAudioTrack)) {
+      rawAudioTrack.enabled = true;
       tracks.push(rawAudioTrack);
+    } else if (isLiveAudioTrack(processedAudioTrack)) {
+      processedAudioTrack.enabled = true;
+      tracks.push(processedAudioTrack);
+    }
+
+    const hasAudio = tracks.some(track => track.kind === 'audio');
+    if (!hasAudio) {
+      console.warn('[MediaRelay] Outgoing stream has no live audio track while unmuted.', {
+        rawAudio: rawAudioTrack ? { enabled: rawAudioTrack.enabled, readyState: rawAudioTrack.readyState } : null,
+        processedAudio: processedAudioTrack ? { enabled: processedAudioTrack.enabled, readyState: processedAudioTrack.readyState } : null,
+        screenAudio: screenAudioTrack ? { enabled: screenAudioTrack.enabled, readyState: screenAudioTrack.readyState } : null,
+      });
     }
 
     return tracks.length > 0 ? new MediaStream(tracks) : null;
@@ -1327,7 +1526,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
             }
           };
 
-          mediaRecorder.start(500);
+          mediaRecorder.start(MEDIA_RECORDER_TIMESLICE_MS);
           startedRecorder = mediaRecorder;
           startedMimeType = candidateMimeType || mediaRecorder.mimeType || 'video/webm';
           mediaRecorderRef.current = mediaRecorder;
@@ -1439,6 +1638,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
   };
 
   const playRemoteVideo = (videoElement: HTMLVideoElement, userId: string) => {
+    videoElement.autoplay = true;
+    videoElement.playsInline = true;
+    videoElement.volume = volume;
+
     if (hasUserInteractedRef.current) {
       videoElement.muted = false;
     }
@@ -1462,6 +1665,70 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
   };
 
+  const enqueueRemoteChunk = (socketId: string, blob: Blob) => {
+    if (!chunkQueueRef.current[socketId]) {
+      chunkQueueRef.current[socketId] = [];
+    }
+
+    if (chunkQueueRef.current[socketId].length >= REMOTE_CHUNK_QUEUE_LIMIT) {
+      chunkQueueRef.current[socketId].shift();
+    }
+
+    chunkQueueRef.current[socketId].push(blob);
+  };
+
+  const processRemoteChunkQueue = async (socketId: string) => {
+    if (remoteChunkProcessingRef.current[socketId]) return;
+
+    const sourceBuffer = sourceBuffersRef.current[socketId];
+    const mediaSource = mediaSourcesRef.current[socketId];
+    const queue = chunkQueueRef.current[socketId];
+
+    if (!sourceBuffer || !mediaSource || mediaSource.readyState !== 'open' || sourceBuffer.updating || !queue?.length) {
+      return;
+    }
+
+    remoteChunkProcessingRef.current[socketId] = true;
+
+    try {
+      const nextChunk = queue[0];
+      const buffer = await nextChunk.arrayBuffer();
+      const latestSourceBuffer = sourceBuffersRef.current[socketId];
+      const latestMediaSource = mediaSourcesRef.current[socketId];
+
+      if (!latestSourceBuffer || !latestMediaSource || latestMediaSource.readyState !== 'open' || latestSourceBuffer.updating) {
+        return;
+      }
+
+      latestSourceBuffer.appendBuffer(buffer);
+      queue.shift();
+    } catch (error: any) {
+      if (error?.name === 'QuotaExceededError') {
+        const latestSourceBuffer = sourceBuffersRef.current[socketId];
+        const userId = socketIdToUserIdMap.current[socketId];
+        const videoElement = userId ? remoteVideoRefs.current[userId] : null;
+
+        try {
+          if (latestSourceBuffer?.buffered.length && !latestSourceBuffer.updating) {
+            const bufferStart = latestSourceBuffer.buffered.start(0);
+            const removeEnd = Math.max(bufferStart, (videoElement?.currentTime || bufferStart) - 6);
+            latestSourceBuffer.remove(bufferStart, removeEnd);
+          }
+        } catch (pruneError) {
+          console.warn(`[Buffer] Queue prune failed for ${socketId}`, pruneError);
+        }
+      } else if (error instanceof DOMException && error.name === 'InvalidStateError') {
+        console.warn(`Ignored InvalidStateError while appending for ${socketId}`);
+      } else {
+        console.error(`Error appending queued buffer for ${socketId}`, error);
+      }
+
+      chunkQueueRef.current[socketId]?.shift();
+    } finally {
+      remoteChunkProcessingRef.current[socketId] = false;
+    }
+  };
+
   const applyRemoteLiveCatchup = (socketId: string, reason: 'interval' | 'updateend' = 'interval') => {
     const sourceBuffer = sourceBuffersRef.current[socketId];
     const userId = socketIdToUserIdMap.current[socketId];
@@ -1476,17 +1743,17 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         playRemoteVideo(videoElement, userId);
       }
 
-      if (latency > 3) {
-        videoElement.currentTime = Math.max(0, liveEdge - 0.35);
+      if (latency > 5) {
+        videoElement.currentTime = Math.max(0, liveEdge - 0.9);
         videoElement.playbackRate = 1.0;
         console.log(`[Latency] Jumped to live edge (${latency.toFixed(2)}s, ${reason})`);
         return;
       }
 
       let nextRate = 1.0;
-      if (latency > 1.5) nextRate = 1.25;
-      else if (latency > 0.9) nextRate = 1.15;
-      else if (latency > 0.45) nextRate = 1.06;
+      if (latency > 2.5) nextRate = 1.12;
+      else if (latency > 1.6) nextRate = 1.08;
+      else if (latency > 1.0) nextRate = 1.04;
 
       if (Math.abs(videoElement.playbackRate - nextRate) > 0.01) {
         videoElement.playbackRate = nextRate;
@@ -1599,9 +1866,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           }
 
           applyRemoteLiveCatchup(socketId, 'updateend');
+          void processRemoteChunkQueue(socketId);
 
           // Process queued chunks
-          if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+          if (false && chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
             const nextChunk = chunkQueueRef.current[socketId][0]; // Peek first
             if (nextChunk) {
               try {
@@ -1640,11 +1908,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         });
 
         // Trigger initial queue processing
-        if (chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+        void processRemoteChunkQueue(socketId);
+        if (false && chunkQueueRef.current[socketId]?.length > 0 && !sourceBuffer.updating && mediaSource.readyState === 'open') {
           const nextChunk = chunkQueueRef.current[socketId].shift();
           if (nextChunk) {
             try {
-              sourceBuffer.appendBuffer(await nextChunk.arrayBuffer());
+              sourceBuffer.appendBuffer(await nextChunk!.arrayBuffer());
             } catch (e) {
               console.error(`Error appending initial queued buffer for ${socketId}`, e);
             }
@@ -1656,7 +1925,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     });
   };
 
-  const cleanupMediaSource = (socketId: string) => {
+  const cleanupMediaSource = (socketId: string, options: { keepMimeType?: boolean } = {}) => {
     console.log(`Cleaning up MediaSource for ${socketId}`);
     stopRemoteLatencyMonitor(socketId);
     const mediaSource = mediaSourcesRef.current[socketId];
@@ -1673,7 +1942,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           sourceBuffer.addEventListener('updateend', () => {
             try {
               finishStream();
-            } catch (e) {
+            } catch (e: any) {
               console.warn(`Ignored delayed endOfStream error for ${socketId}`, e);
             }
           }, { once: true });
@@ -1702,7 +1971,10 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     delete mediaSourcesRef.current[socketId];
     delete sourceBuffersRef.current[socketId];
     delete chunkQueueRef.current[socketId];
-    delete remoteMimeTypesRef.current[socketId];
+    delete remoteChunkProcessingRef.current[socketId];
+    if (!options.keepMimeType) {
+      delete remoteMimeTypesRef.current[socketId];
+    }
     const blockedVideoUserId = socketIdToUserIdMap.current[socketId];
     const videoElement = blockedVideoUserId ? remoteVideoRefs.current[blockedVideoUserId] : undefined;
     if (videoElement) {
@@ -2009,22 +2281,71 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
   };
 
+  const requestRemoteStreamRestart = (socketId: string, userId: string, reason: string) => {
+    const now = Date.now();
+    const lastRequestedAt = remoteRecoveryLastRequestedAtRef.current[socketId] || 0;
+
+    if (now - lastRequestedAt < 1500) {
+      console.warn(`[VideoRef] Recovery request skipped for ${userId}; already requested ${now - lastRequestedAt}ms ago.`);
+      return;
+    }
+
+    remoteRecoveryLastRequestedAtRef.current[socketId] = now;
+    remoteStreamRestartPendingRef.current.add(socketId);
+    console.warn(`[VideoRef] Requesting remote stream restart for ${userId}: ${reason}`);
+    cleanupMediaSource(socketId, { keepMimeType: true });
+    socketRef.current?.emit('request-keyframe', { roomId, userId });
+
+    window.setTimeout(() => {
+      remoteStreamRestartPendingRef.current.delete(socketId);
+    }, 2500);
+  };
+
+  const unmuteMicrophone = useCallback(() => {
+    if (!isBroadcastPresenterRef.current) return false;
+    if (!isMutedRef.current) return true;
+
+    setIsMuted(false);
+    isMutedRef.current = false;
+    if (gainNodeRef.current) {
+      gainNodeRef.current.gain.value = micVolume || 1;
+    }
+    socketRef.current?.emit('mic-state-changed', {
+      roomId,
+      userId: currentUserIdRef.current,
+      isMuted: false
+    });
+    void initializeMediaStream(localVideoOnRef.current, false, false);
+    startBrowserStt('mic enable', 500);
+    console.log('[STT] Mic auto-enabled for subtitles');
+    return true;
+  }, [roomId, startBrowserStt]);
+
+  useEffect(() => {
+    if (!pendingSubtitleMicEnableRef.current) return;
+    if (!isBroadcastPresenter || !isSubtitlesEnabled) return;
+    pendingSubtitleMicEnableRef.current = false;
+    unmuteMicrophone();
+  }, [isBroadcastPresenter, isSubtitlesEnabled, unmuteMicrophone]);
+
   const toggleMute = () => {
     if (!isBroadcastPresenterRef.current) return;
 
     const newMutedState = !isMuted;
-    setIsMuted(newMutedState);
-    isMutedRef.current = newMutedState;
 
     if (!newMutedState) {
-      socketRef.current?.emit('mic-state-changed', {
-        roomId,
-        userId: currentUserIdRef.current,
-        isMuted: false
-      });
-      void initializeMediaStream(localVideoOnRef.current, false, false);
+      if (!isSubtitlesEnabledRef.current) {
+        setIsSubtitlesEnabled(true);
+        isSubtitlesEnabledRef.current = true;
+        setAssistantPanelTab('translation');
+        console.log('[STT] Subtitles auto-enabled with microphone');
+      }
+      unmuteMicrophone();
       return;
     }
+
+    setIsMuted(true);
+    isMutedRef.current = true;
 
     // 1. Web Audio API (GainNode) 볼륨 조절
     if (gainNodeRef.current) {
@@ -2049,11 +2370,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       });
     }
 
-    try {
-      recognitionRef.current?.abort?.();
-      recognitionRef.current?.stop?.();
-      console.log("[STT] Aborted (mic muted)");
-    } catch (e) {}
+    stopBrowserStt('mic muted');
     stopSubtitleAudioStreaming();
     socketRef.current?.emit('subtitle-stt-stop', { roomId });
     closeAudioContext();
@@ -2215,9 +2532,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     }
 
     console.log('[ChatDebug] Emitting chat-message to room:', roomId);
+    const randomPart = globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
     socketRef.current.emit('chat-message', {
       roomId,
-      message: newMessage
+      message: newMessage,
+      clientMessageId: `${currentUserIdRef.current || 'user'}-${Date.now()}-${randomPart}`
     });
     setNewMessage('');
   };
@@ -2398,7 +2717,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
         if (mediaSource.readyState === 'closed') {
           console.warn(`[VideoRef] MediaSource for ${userId} is closed, triggering FULL cleanup`);
-          cleanupMediaSource(socketId);
+          requestRemoteStreamRestart(socketId, userId, 'closed MediaSource');
           return;
         }
 
@@ -2414,7 +2733,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
         // Force refresh if re-attaching (Layout Switch)
         if (el.src !== newUrl) {
           console.log(`[VideoRef] Requesting keyframe for ${userId} due to re-attach`);
-          socketRef.current?.emit('request-keyframe', { roomId, userId });
+          requestRemoteStreamRestart(socketId, userId, 'video element re-attached');
+          return;
         }
 
         el.src = newUrl;
@@ -2426,9 +2746,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           // Only force cleanup for fatal errors (MEDIA_ERR_DECODE=3, MEDIA_ERR_SRC_NOT_SUPPORTED=4)
           // Minor errors (MEDIA_ERR_ABORTED=1, MEDIA_ERR_NETWORK=2) can self-recover
           if (errorCode >= 3) {
-            console.error(`[VideoRef] Fatal video error for ${userId} (code ${errorCode}):`, videoError?.message);
-            cleanupMediaSource(socketId);
-            socketRef.current?.emit('request-keyframe', { roomId, userId });
+            requestRemoteStreamRestart(socketId, userId, `video decode error ${errorCode}: ${videoError?.message || 'unknown'}`);
           } else {
             console.warn(`[VideoRef] Minor video error for ${userId} (code ${errorCode}), auto-recovering...`);
             // Re-attach the listener for next potential error
@@ -2450,10 +2768,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
 
   // --- Render Logic ---
   const localParticipant = { userId: currentUserId, username: 'Me', isMuted, hasVideo: localVideoOn, isLocal: true, canBroadcast: isBroadcastPresenter };
-  const pinnedParticipant = participants.find(p => p.userId === pinnedUserId) || (pinnedUserId === currentUserId ? localParticipant : null);
-  const mainSpeaker = pinnedParticipant || participants[0] || localParticipant; // Default to first remote user, or Me if alone
-  const shouldShowSubtitles = subtitles.length > 0 && (isSubtitlesEnabled || !isBroadcastPresenter);
+  const allParticipants = [localParticipant, ...participants.filter(p => p.userId !== currentUserId)];
+  const pinnedParticipant = allParticipants.find(p => p.userId === pinnedUserId) || null;
+  const activeSpeakingParticipant = allParticipants.find(p => speakingParticipants.has(p.userId));
+  const broadcastPresenterParticipant = allParticipants.find(p => p.userId === currentUserId && p.canBroadcast)
+    || allParticipants.find(p => p.canBroadcast);
+  const mainSpeaker = pinnedParticipant || activeSpeakingParticipant || broadcastPresenterParticipant || allParticipants[0] || localParticipant;
+  const shouldShowSubtitles = subtitles.length > 0;
+  const canSwitchLayout = broadcastMode === 'all';
+  const effectiveLayoutMode = canSwitchLayout ? layoutMode : 'speaker';
   const selectedSubtitleLangs = new Set(subtitleLangs);
+  const visibleSubtitleLangs = (['ko', 'en', 'ja', 'zh'] as SubtitleLang[]).filter(lang => selectedSubtitleLangs.has(lang));
+  const latestSubtitle = subtitles[subtitles.length - 1];
+  const latestTranscriptSubtitle = subtitleTranscript[subtitleTranscript.length - 1] || latestSubtitle;
+  const subtitleHistory = subtitleTranscript.slice().reverse();
+  const showAssistantPanel = showChatPanel || (shouldShowSubtitles && Boolean(latestSubtitle));
+  const shouldShowTranscriptPanel = isSubtitlesEnabled || subtitleTranscript.length > 0;
 
   const getParticipantReactions = (userId: string) => reactions.filter(reaction => reaction.userId === userId);
   const getSpeakerAction = (participant: Participant) => {
@@ -2489,6 +2819,11 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       fractionalSecondDigits: 3,
     });
   };
+  const formatSubtitleLatency = (latencyMs?: number) => {
+    if (typeof latencyMs !== 'number') return null;
+    if (latencyMs >= 1000) return `${(latencyMs / 1000).toFixed(1)}s`;
+    return `${latencyMs}ms`;
+  };
   const toggleSubtitleLang = (lang: SubtitleLang) => {
     setSubtitleLangs(prev => {
       if (prev.includes(lang)) {
@@ -2497,7 +2832,6 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
       return [...prev, lang];
     });
   };
-  const allParticipants = [localParticipant, ...participants.filter(p => p.userId !== currentUserId)];
   const remoteParticipants = allParticipants.filter(p => p.userId !== mainSpeaker.userId);
   const presenterCount = allParticipants.filter(p => p.canBroadcast).length;
   const subtitleLanguageLabels: Record<SubtitleLang, string> = {
@@ -2505,6 +2839,22 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
     en: '영어',
     ja: '일본어',
     zh: '중국어',
+  };
+  const subtitleLanguageTextColor: Record<SubtitleLang, string> = {
+    ko: 'text-white',
+    en: 'text-amber-100',
+    ja: 'text-emerald-100',
+    zh: 'text-rose-100',
+  };
+  const subtitleLanguageBorderColor: Record<SubtitleLang, string> = {
+    ko: 'border-cyan-300/35',
+    en: 'border-amber-300/25',
+    ja: 'border-emerald-300/25',
+    zh: 'border-rose-300/25',
+  };
+  const getSubtitleText = (subtitle: SubtitleData | undefined, lang: SubtitleLang) => {
+    if (!subtitle) return '';
+    return subtitle[lang] || subtitle.originalText || '';
   };
   const visibleSummary = meetingSummaries[0] || DEMO_MEETING_SUMMARY;
   const visibleSummaryCreatedAt = new Date(visibleSummary.createdAt).toLocaleString('ko-KR', {
@@ -2617,9 +2967,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 size="sm"
                 className={cn(
                   "text-white transition-all rounded-xl px-3 py-1.5 h-auto",
-                  layoutMode === 'speaker' ? "bg-white/20 shadow-sm" : "hover:bg-white/10 opacity-70 hover:opacity-100"
+                  effectiveLayoutMode === 'speaker' ? "bg-white/20 shadow-sm" : "hover:bg-white/10 opacity-70 hover:opacity-100",
+                  !canSwitchLayout && "cursor-not-allowed opacity-50 hover:bg-transparent"
                 )}
-                onClick={() => setLayoutMode('speaker')}
+                onClick={() => canSwitchLayout && setLayoutMode('speaker')}
+                disabled={!canSwitchLayout}
+                title={canSwitchLayout ? undefined : '전체 화자 모드에서만 화면 전환 가능'}
               >
                 <Maximize className="w-4 h-4 md:mr-2" /> <span className="hidden text-sm font-medium md:inline">발표자</span>
               </Button>
@@ -2628,9 +2981,12 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                 size="sm"
                 className={cn(
                   "text-white transition-all rounded-xl px-3 py-1.5 h-auto",
-                  layoutMode === 'grid' ? "bg-white/20 shadow-sm" : "hover:bg-white/10 opacity-70 hover:opacity-100"
+                  effectiveLayoutMode === 'grid' ? "bg-white/20 shadow-sm" : "hover:bg-white/10 opacity-70 hover:opacity-100",
+                  !canSwitchLayout && "cursor-not-allowed opacity-50 hover:bg-transparent"
                 )}
-                onClick={() => setLayoutMode('grid')}
+                onClick={() => canSwitchLayout && setLayoutMode('grid')}
+                disabled={!canSwitchLayout}
+                title={canSwitchLayout ? undefined : '전체 화자 모드에서만 화면 전환 가능'}
               >
                 <LayoutGrid className="w-4 h-4 md:mr-2" /> <span className="hidden text-sm font-medium md:inline">갤러리</span>
               </Button>
@@ -2640,7 +2996,7 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           {/* Main Video Area */}
           <div className="flex h-full min-h-0 w-full flex-col p-1 pt-14 md:p-3 md:pt-14">
 
-            {layoutMode === 'grid' ? (
+            {effectiveLayoutMode === 'grid' ? (
               /* --- GRID VIEW (Smart Grid) --- */
               <div className="flex h-full w-full flex-1 flex-wrap content-center justify-center gap-2 overflow-y-auto p-1 md:gap-3 md:p-2">
                 {allParticipants.map((p, index, array) => {
@@ -2733,39 +3089,108 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
           </div>
 
           {/* Subtitles Overlay */}
-          {shouldShowSubtitles && (
-            <div className="pointer-events-none absolute bottom-32 left-0 right-0 z-40 flex flex-col items-center justify-end gap-2 px-3 md:px-6">
-              {subtitles.map((sub) => (
-                <div key={sub.id} className="w-full max-w-3xl animate-in rounded-xl border border-white/10 bg-black/78 px-4 py-3 text-center shadow-2xl backdrop-blur-md slide-in-from-bottom-2 fade-in duration-300">
-                  <div className="mb-2 flex flex-wrap items-center justify-center gap-2 text-[11px]">
-                    <span className="font-semibold text-blue-200">{sub.userName}</span>
-                    {typeof sub.latencyMs === 'number' && (
-                      <span className="rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2 py-0.5 font-mono font-semibold text-emerald-200">
-                        {sub.latencyMs}ms
-                      </span>
-                    )}
-                    <span className="inline-flex items-center gap-1 font-mono text-white/45">
-                      <Clock3 className="h-3 w-3" />
-                      {formatSubtitleTime(sub.translationStartedAt)} - {formatSubtitleTime(sub.translationFinishedAt)}
-                    </span>
+          {((shouldShowSubtitles && latestSubtitle) || shouldShowTranscriptPanel) && (
+            <>
+              {shouldShowSubtitles && latestSubtitle && (
+              <div className="pointer-events-none absolute bottom-32 left-0 right-0 z-40 flex justify-center px-4 md:px-8">
+                <div className="w-full max-w-3xl animate-in rounded-lg border border-white/12 bg-black/82 px-5 py-4 text-center shadow-2xl shadow-black/40 backdrop-blur-md slide-in-from-bottom-2 fade-in duration-300 md:px-6">
+                  <div className="mb-2 flex items-center justify-center gap-2 text-xs text-white/45">
+                    <Subtitles className="h-3.5 w-3.5" />
+                    <span className="font-semibold text-white/75">{latestSubtitle.userName}</span>
+                    <span className="h-1 w-1 rounded-full bg-white/25" />
+                    <span>한국어 대표 자막</span>
                   </div>
-                  <div className="flex flex-col gap-1">
-                    {selectedSubtitleLangs.has('ko') && (
-                      <p className="text-sm font-medium leading-snug text-white drop-shadow-md md:text-base">KO {sub.ko}</p>
-                    )}
-                    {selectedSubtitleLangs.has('en') && (
-                      <p className="text-sm font-medium leading-snug text-yellow-200 drop-shadow-md md:text-base">EN {sub.en}</p>
-                    )}
-                    {selectedSubtitleLangs.has('ja') && (
-                      <p className="text-sm font-medium leading-snug text-emerald-200 drop-shadow-md md:text-base">JA {sub.ja}</p>
-                    )}
-                    {selectedSubtitleLangs.has('zh') && (
-                      <p className="text-sm font-medium leading-snug text-rose-200 drop-shadow-md md:text-base">ZH {sub.zh}</p>
-                    )}
+                  {formatSubtitleLatency(latestSubtitle.latencyMs) && (
+                    <div className="mb-2 flex justify-center">
+                      <span className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-emerald-100/80">
+                        {formatSubtitleLatency(latestSubtitle.latencyMs)}
+                      </span>
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    {visibleSubtitleLangs.map((lang, index) => (
+                      <p
+                        key={lang}
+                        className={cn(
+                          "mx-auto max-w-2xl font-semibold leading-snug tracking-normal drop-shadow-md",
+                          index === 0 ? "text-lg md:text-2xl" : "text-sm md:text-base",
+                          subtitleLanguageTextColor[lang]
+                        )}
+                      >
+                        <span className="mr-2 align-middle text-[10px] font-bold uppercase text-white/42">{lang}</span>
+                        {getSubtitleText(latestSubtitle, lang)}
+                      </p>
+                    ))}
                   </div>
                 </div>
-              ))}
-            </div>
+              </div>
+              )}
+
+              {shouldShowTranscriptPanel && (
+              <aside
+                className={cn(
+                  "pointer-events-auto absolute bottom-24 right-4 top-20 z-30 hidden w-80 overflow-hidden rounded-lg border border-white/10 bg-zinc-950/82 text-white shadow-2xl shadow-black/35 backdrop-blur-xl md:flex md:flex-col",
+                  showControls && "bottom-28"
+                )}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-white/10 px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold">실시간 번역 기록</div>
+                      <div className="mt-1 text-xs text-white/45">자막, 회의록, 요약으로 이어지는 기록</div>
+                    </div>
+                    <Languages className="h-4 w-4 text-white/45" />
+                  </div>
+                </div>
+
+                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+                  {subtitleHistory.length === 0 && (
+                    <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-xs leading-relaxed text-white/45">
+                      자막 기록이 여기에 쌓입니다.
+                    </div>
+                  )}
+                  {subtitleHistory.map((sub) => (
+                    <div key={sub.id} className="rounded-lg border border-white/10 bg-white/[0.045] p-3">
+                      <div className="mb-2 flex items-center justify-between text-xs">
+                        <span className="font-semibold text-cyan-100">{sub.userName}</span>
+                        <span className="flex items-center gap-2 font-mono text-white/38">
+                          {formatSubtitleLatency(sub.latencyMs) && (
+                            <span className="text-emerald-100/70">{formatSubtitleLatency(sub.latencyMs)}</span>
+                          )}
+                          {formatSubtitleTime(sub.translationFinishedAt || sub.translationStartedAt)}
+                        </span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {visibleSubtitleLangs.slice(0, 2).map((lang) => (
+                          <p key={lang} className={cn("text-xs font-medium leading-snug", lang === visibleSubtitleLangs[0] ? "text-sm" : "", subtitleLanguageTextColor[lang])}>
+                            {getSubtitleText(sub, lang)}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="border-t border-white/10 px-4 py-3">
+                  <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-white/65">
+                    <Languages className="h-3.5 w-3.5" />
+                    4개 언어 상세 보기
+                  </div>
+                  <div className="space-y-2">
+                    {latestTranscriptSubtitle && visibleSubtitleLangs.map((lang) => (
+                      <div key={lang} className={cn("rounded-lg border bg-black/22 px-3 py-2", subtitleLanguageBorderColor[lang])}>
+                        <div className="mb-1 text-[10px] font-bold uppercase text-white/45">{lang}</div>
+                        <p className={cn("text-xs font-medium leading-snug", subtitleLanguageTextColor[lang])}>
+                          {getSubtitleText(latestTranscriptSubtitle, lang)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </aside>
+              )}
+            </>
           )}
 
           {/* Reaction Bar (Floating) */}
@@ -2861,7 +3286,34 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                     "flex flex-col items-center justify-center w-14 h-14 md:w-16 md:h-16 rounded-xl hover:bg-white/10 text-white transition-all",
                     isSubtitlesEnabled && "text-yellow-400 bg-white/10"
                   )}
-                  onClick={() => setIsSubtitlesEnabled(!isSubtitlesEnabled)}
+                  onClick={() => {
+                    const nextEnabled = !isSubtitlesEnabled;
+                    console.log('[STT] Subtitle toggle', {
+                      nextEnabled,
+                      isHost,
+                      broadcastMode,
+                      isBroadcastPresenter: isBroadcastPresenterRef.current,
+                      isMuted: isMutedRef.current,
+                      hasRecognition: Boolean(recognitionRef.current),
+                      socketConnected: Boolean(socketRef.current?.connected),
+                    });
+                    setIsSubtitlesEnabled(nextEnabled);
+                    if (nextEnabled) {
+                      setAssistantPanelTab('translation');
+                      if (!isBroadcastPresenterRef.current) {
+                        if (isHost && broadcastMode === 'single') {
+                          pendingSubtitleMicEnableRef.current = true;
+                          setBroadcastPresenter(currentUserIdRef.current);
+                          showSystemNotice('자막을 위해 나를 화자로 전환합니다.');
+                        } else {
+                          showSystemNotice('화자 권한이 있어야 내 음성 자막이 생성됩니다.');
+                        }
+                      } else if (isMutedRef.current) {
+                        unmuteMicrophone();
+                        showSystemNotice('자막을 위해 마이크를 켰습니다.');
+                      }
+                    }
+                  }}
                   aria-label={isSubtitlesEnabled ? '자막 끄기' : '자막 켜기'}
                   aria-pressed={isSubtitlesEnabled}
                 >
@@ -2917,7 +3369,8 @@ export default function MeetingClient({ roomId }: { roomId: string }) {
                               // Restart STT with new language immediately
                               if (recognitionRef.current) {
                                 recognitionRef.current.lang = lang.val;
-                                recognitionRef.current.stop(); // onend handler will restart it
+                                stopBrowserStt('language changed');
+                                startBrowserStt('language changed', 300);
                               }
                             }}
                           >

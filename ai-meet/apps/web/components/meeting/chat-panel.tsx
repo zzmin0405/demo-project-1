@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { useEffect, useRef } from 'react';
 
 interface ChatMessage {
+    id?: string;
     userId: string;
     username: string;
     message: string;
@@ -62,7 +63,7 @@ export function ChatPanel({
                 {messages.map((msg, idx) => {
                     const isMe = msg.userId === currentUserId;
                     return (
-                        <div key={idx} className={cn("flex gap-2", isMe ? "flex-row-reverse" : "flex-row")}>
+                        <div key={msg.id ?? `${msg.userId}-${msg.timestamp}-${idx}`} className={cn("flex gap-2", isMe ? "flex-row-reverse" : "flex-row")}>
                             <div className="flex-shrink-0">
                                 {msg.avatar_url ? (
                                     <Image src={msg.avatar_url} alt={msg.username} width={32} height={32} className="rounded-full object-cover border border-border" />
